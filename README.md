@@ -72,6 +72,9 @@ debug: false
 backup_panel_position: bottom
 ```
 
+<img width="1563" height="605" alt="image" src="https://github.com/user-attachments/assets/d780354b-82b7-4665-8921-036847658722" />
+
+
 ## Configuration
 
 | Option | Type | Default | Description |
