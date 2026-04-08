@@ -53,9 +53,9 @@ const REGION_CONFIG = {
 };
 
 const EDITABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_obstacle', 'region_placed_blank'];
-const DRAWABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
-const MODIFIABLE = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
-const DELETABLE  = [...EDITABLE];
+const DRAWABLE   = ['region_channel', 'region_forbidden', 'region_placed_blank'];
+const MODIFIABLE = ['region_channel', 'region_forbidden', 'region_placed_blank'];
+const DELETABLE  = ['region_channel', 'region_forbidden', 'region_obstacle', 'region_placed_blank'];
 const ALL_TYPES  = [...EDITABLE, 'region_charger_channel'];
 const DRAW_ORDER = ['region_work', 'region_charger_channel', 'region_channel', 'region_placed_blank', 'region_forbidden', 'region_obstacle'];
 const HIT_ORDER  = ['region_obstacle', 'region_forbidden', 'region_placed_blank', 'region_channel', 'region_charger_channel', 'region_work'];
@@ -105,7 +105,7 @@ class SunseekerMapEditCard extends HTMLElement {
     this._selType    = null;
     this._selId      = null;
     this._mode       = 'select';   // 'select' | 'draw' | 'delete'
-    this._drawType   = 'region_work';
+    this._drawType   = 'region_channel';
     this._drawPts    = [];         // points being placed
     this._drawShape  = 'polygon';  // 'polygon' | 'circle' | 'ellipse'
     this._drawAnchor = null;       // map coords for circle center / ellipse first corner
@@ -639,7 +639,6 @@ input[type=file] { display: none; }
     <button class="btn del"    id="mode-delete" title="Click to delete region — D">🗑 Delete</button>
     <div class="tsep"></div>
     <select class="dt" id="draw-type">
-      <option value="region_work">🌱 Work Zone</option>
       <option value="region_channel">↔️ Channel</option>
       <option value="region_forbidden">🚫 Forbidden</option>
       <option value="region_placed_blank">⬜ Safe zone</option>
@@ -830,7 +829,7 @@ input[type=file] { display: none; }
     this._renderSidebar();
     this._renderProps();
     const total = EDITABLE.reduce((s, t) => s + (this._regions[t] || []).length, 0);
-    this._status(`✅ Loaded: ${filename}  (${total} editable regions)`);
+    this._status(`✅ Loaded: ${filename}  (${total} regions)`);
   }
 
   // ── Coordinate transform ──────────────────────────────────────────────────────
@@ -1677,9 +1676,11 @@ input[type=file] { display: none; }
       return;
     }
     let html = '';
-    for (const t of DELETABLE) {
+    for (const t of EDITABLE) {
       const cfg = REGION_CONFIG[t];
       const list = this._regions[t] || [];
+      const canDelete = DELETABLE.includes(t);
+      const canRename = false;
       html += `<div class="grp-hdr">
         <span class="dot" style="background:${cfg.stroke}"></span>
         ${cfg.icon} ${cfg.label}
@@ -1689,10 +1690,9 @@ input[type=file] { display: none; }
       for (const r of list) {
         const sel  = r.id === this._selId && t === this._selType;
         const name = r.name || `…${String(r.id).slice(-7)}`;
-        const canRename = t === 'region_work';
         html += `<div class="ri${sel ? ' sel' : ''}" data-type="${t}" data-id="${r.id}">
           <span class="rn" ${canRename ? 'title="Double-click to rename"' : ''}>${escHtml(name)}</span>
-          <button class="rdel" data-type="${t}" data-id="${r.id}" title="Delete">✕</button>
+          ${canDelete ? `<button class="rdel" data-type="${t}" data-id="${r.id}" title="Delete">✕</button>` : ''}
         </div>`;
       }
     }
@@ -1728,7 +1728,7 @@ input[type=file] { display: none; }
       });
 
       const nameEl = el.querySelector('.rn');
-      if (nameEl && el.dataset.type === 'region_work') {
+      if (nameEl && el.dataset.type === 'region_work' && MODIFIABLE.includes('region_work')) {
         nameEl.addEventListener('dblclick', ev => {
           ev.stopPropagation();
           const id = Number(el.dataset.id);
@@ -1908,7 +1908,7 @@ input[type=file] { display: none; }
     this._selType      = null;
     this._selId        = null;
     this._mode         = 'select';
-    this._drawType     = 'region_work';
+    this._drawType     = 'region_channel';
     this._drawPts      = [];
     this._drawShape    = 'polygon';
     this._drawAnchor   = null;
@@ -2290,6 +2290,7 @@ class SunseekerMapEditCardEditor extends HTMLElement {
     </select>
     <div class="hint">Use side layout for tall/vertical maps.</div>
   </div>
+  Version 1.0.0
 </div>`;
 
     const es = this.shadowRoot.getElementById('entity-sel');
