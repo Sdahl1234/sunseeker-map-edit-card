@@ -14,7 +14,7 @@ const REGION_CONFIG = {
     fill: 'rgba(160,160,160,0.45)',
     stroke: '#b0b0b0',
     selFill: 'rgba(200,200,200,0.65)',
-    label: 'Channel',
+    label: 'Passage',
     icon: '↔️',
     effective_area: 'INNER',
   },
@@ -53,8 +53,8 @@ const REGION_CONFIG = {
 };
 
 const EDITABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_obstacle', 'region_placed_blank'];
-const DRAWABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
-const MODIFIABLE = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
+const DRAWABLE   = ['region_forbidden', 'region_placed_blank', 'region_obstacle', 'region_channel'];
+const MODIFIABLE = ['region_channel', 'region_forbidden', 'region_placed_blank'];
 const DELETABLE  = [...EDITABLE];
 const ALL_TYPES  = [...EDITABLE, 'region_charger_channel'];
 const DRAW_ORDER = ['region_work', 'region_charger_channel', 'region_channel', 'region_placed_blank', 'region_forbidden', 'region_obstacle'];
@@ -105,7 +105,7 @@ class SunseekerMapEditCard extends HTMLElement {
     this._selType    = null;
     this._selId      = null;
     this._mode       = 'select';   // 'select' | 'draw' | 'delete'
-    this._drawType   = 'region_work';
+    this._drawType   = 'region_obstacle';
     this._drawPts    = [];         // points being placed
     this._drawShape  = 'polygon';  // 'polygon' | 'circle' | 'ellipse'
     this._drawAnchor = null;       // map coords for circle center / ellipse first corner
@@ -322,10 +322,15 @@ select.dt {
   padding: 5px 8px;
   border-radius: 6px;
   border: 1px solid rgba(255,255,255,0.14);
-  background: rgba(255,255,255,0.07);
-  color: var(--primary-text-color, #e1e1e1);
+  background: rgba(0,0,0,0.28);
+  color: var(--primary-text-color, #f3f3f3);
+  font-weight: 600;
   font-size: 12px;
   cursor: pointer;
+}
+select.dt option {
+  background: var(--ha-card-background, var(--card-background-color, #1c1c1e));
+  color: var(--primary-text-color, #f3f3f3);
 }
 
 /* ── Main area ── */
@@ -676,10 +681,10 @@ input[type=file] { display: none; }
     <button class="btn" id="mode-draw"   title="Draw new region — W">✏ Draw</button>
     <div class="tsep"></div>
     <select class="dt" id="draw-type">
-      <option value="region_work">🌱 Work Zone</option>
-      <option value="region_channel">↔️ Channel</option>
       <option value="region_forbidden">🚫 Forbidden</option>
       <option value="region_placed_blank">⬜ Safe zone</option>
+      <option value="region_obstacle">⛔ Obstacle</option>
+      <option value="region_channel">↔️ Passage</option>
     </select>
     <button class="btn shape-btn active" id="shape-polygon" title="Draw polygon — click to place vertices">⬡ Poly</button>
     <button class="btn shape-btn" id="shape-circle"  title="Draw circle — click-drag from center">○ Circle</button>
@@ -2107,7 +2112,7 @@ input[type=file] { display: none; }
   _renderProps() {
     const panel = this._props;
     const r = this._selRegion();
-    if (!r || !MODIFIABLE.includes(this._selType)) {
+    if (!r || (!MODIFIABLE.includes(this._selType) && this._selType !== 'region_work')) {
       panel.style.display = 'none';
       return;
     }
@@ -2294,7 +2299,7 @@ input[type=file] { display: none; }
     this._selType      = null;
     this._selId        = null;
     this._mode         = 'select';
-    this._drawType     = 'region_work';
+    this._drawType     = 'region_obstacle';
     this._drawPts      = [];
     this._drawShape    = 'polygon';
     this._drawAnchor   = null;
