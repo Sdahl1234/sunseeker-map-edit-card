@@ -53,9 +53,9 @@ const REGION_CONFIG = {
 };
 
 const EDITABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_obstacle', 'region_placed_blank'];
-const DRAWABLE   = ['region_channel', 'region_forbidden', 'region_placed_blank'];
-const MODIFIABLE = ['region_channel', 'region_forbidden', 'region_placed_blank'];
-const DELETABLE  = ['region_channel', 'region_forbidden', 'region_obstacle', 'region_placed_blank'];
+const DRAWABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
+const MODIFIABLE = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
+const DELETABLE  = [...EDITABLE];
 const ALL_TYPES  = [...EDITABLE, 'region_charger_channel'];
 const DRAW_ORDER = ['region_work', 'region_charger_channel', 'region_channel', 'region_placed_blank', 'region_forbidden', 'region_obstacle'];
 const HIT_ORDER  = ['region_obstacle', 'region_forbidden', 'region_placed_blank', 'region_channel', 'region_charger_channel', 'region_work'];
@@ -105,7 +105,7 @@ class SunseekerMapEditCard extends HTMLElement {
     this._selType    = null;
     this._selId      = null;
     this._mode       = 'select';   // 'select' | 'draw' | 'delete'
-    this._drawType   = 'region_channel';
+    this._drawType   = 'region_work';
     this._drawPts    = [];         // points being placed
     this._drawShape  = 'polygon';  // 'polygon' | 'circle' | 'ellipse'
     this._drawAnchor = null;       // map coords for circle center / ellipse first corner
@@ -136,6 +136,15 @@ class SunseekerMapEditCard extends HTMLElement {
 
     // Backup panel state
     this._backupSig = '';
+
+    // Merge workflow state
+    this._hasLocalEdits = false;
+    this._mergeIds = []; // two selected region_work ids to merge
+
+    // Split workflow state
+    this._splitRegionId  = null;  // selected work zone id
+    this._splitLinePts   = [];    // polyline points being drawn / finalized
+    this._splitPending   = false; // line finished, awaiting submit
 
     this._buildUI();
   }
@@ -283,6 +292,31 @@ class SunseekerMapEditCard extends HTMLElement {
 .btn.save:hover { background: rgba(34,165,34,0.9); }
 .btn.submit { background: rgba(3,120,220,0.78); border-color: rgba(90,170,240,0.5); color: #fff; font-weight: 600; }
 .btn.submit:hover { background: rgba(3,140,235,0.92); }
+
+.workflow-status {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  border: 1px solid rgba(255,255,255,0.20);
+  background: rgba(127,127,127,0.18);
+  color: var(--primary-text-color, #e1e1e1);
+  white-space: nowrap;
+}
+.workflow-status.clean {
+  border-color: rgba(80,220,120,0.45);
+  background: rgba(35,130,65,0.35);
+}
+.workflow-status.edited {
+  border-color: rgba(255,190,80,0.5);
+  background: rgba(165,105,25,0.35);
+}
+.workflow-status.merge {
+  border-color: rgba(90,170,240,0.55);
+  background: rgba(35,95,155,0.40);
+}
 
 select.dt {
   padding: 5px 8px;
@@ -636,9 +670,13 @@ input[type=file] { display: none; }
     </div>
     <div class="tsep" id="debug-import-sep"></div>
     <button class="btn active" id="mode-select" title="Select / Move — S">↖ Select</button>
+    <button class="btn" id="mode-merge" title="Select exactly two adjacent work zones to merge">🔗 Merge</button>
+    <button class="btn" id="mode-split" title="Draw a split line across one work zone">✂ Split</button>
     <button class="btn del"    id="mode-delete" title="Click to delete region — D">🗑 Delete</button>
+    <button class="btn" id="mode-draw"   title="Draw new region — W">✏ Draw</button>
     <div class="tsep"></div>
     <select class="dt" id="draw-type">
+      <option value="region_work">🌱 Work Zone</option>
       <option value="region_channel">↔️ Channel</option>
       <option value="region_forbidden">🚫 Forbidden</option>
       <option value="region_placed_blank">⬜ Safe zone</option>
@@ -646,7 +684,6 @@ input[type=file] { display: none; }
     <button class="btn shape-btn active" id="shape-polygon" title="Draw polygon — click to place vertices">⬡ Poly</button>
     <button class="btn shape-btn" id="shape-circle"  title="Draw circle — click-drag from center">○ Circle</button>
     <button class="btn shape-btn" id="shape-ellipse" title="Draw ellipse — click-drag bounding box">⬭ Ellipse</button>
-    <button class="btn" id="mode-draw"   title="Draw new region — W">✏ Draw</button>
     <button class="btn" id="btn-undo"    title="Undo last draw point — Z  |  Undo last delete — Ctrl+Z">⎌ Undo</button>
     <button class="btn" id="btn-finish"  title="Finish polygon — Enter">✓ Done</button>
     <button class="btn" id="btn-cancel"  title="Cancel drawing — Esc">✗ Cancel</button>
@@ -655,6 +692,7 @@ input[type=file] { display: none; }
     <button class="btn save" id="save-btn">💾 Save JSON</button>
     <button class="btn" id="reload-btn" title="Clear all edits and reload from entity attribute — Shift+R">🔄 Reset</button>
     <button class="btn submit" id="submit-btn" title="Call sunseeker.set_map with current map data">☁ Submit Map</button>
+    <span class="workflow-status clean" id="workflow-status" title="Edit and merge workflow state">State: Clean</span>
   </div>
 
   <!-- Work area -->
@@ -715,6 +753,7 @@ input[type=file] { display: none; }
     this._confirmMsg = this.shadowRoot.getElementById('confirm-msg');
     this._confirmOk = this.shadowRoot.getElementById('confirm-ok');
     this._confirmCancel = this.shadowRoot.getElementById('confirm-cancel');
+    this._workflowStatus = this.shadowRoot.getElementById('workflow-status');
 
     this._applyConfigUi();
 
@@ -722,13 +761,19 @@ input[type=file] { display: none; }
     this.shadowRoot.getElementById('import-btn').onclick = () => this.shadowRoot.getElementById('fi').click();
     this.shadowRoot.getElementById('fi').addEventListener('change', e => this._loadFile(e));
     this.shadowRoot.getElementById('mode-select').onclick = () => this._setMode('select');
+    this.shadowRoot.getElementById('mode-merge').onclick  = () => this._setMode('merge');
+    this.shadowRoot.getElementById('mode-split').onclick  = () => this._setMode('split');
     this.shadowRoot.getElementById('mode-draw').onclick   = () => this._setMode('draw');
     this.shadowRoot.getElementById('mode-delete').onclick = () => this._setMode('delete');
     this.shadowRoot.getElementById('btn-undo').onclick    = () => {
       if (this._mode === 'draw') this._undoPoint();
+      else if (this._mode === 'split') this._undoSplitPoint();
       else if (this._mode === 'delete') this._undoDelete();
     };
-    this.shadowRoot.getElementById('btn-finish').onclick  = () => this._finishDraw();
+    this.shadowRoot.getElementById('btn-finish').onclick  = () => {
+      if (this._mode === 'split') this._finishSplit();
+      else this._finishDraw();
+    };
     this.shadowRoot.getElementById('btn-cancel').onclick  = () => this._cancelDraw();
     this.shadowRoot.getElementById('btn-fit').onclick     = () => { this._resetView(); this._redraw(); };
     this.shadowRoot.getElementById('submit-btn').onclick  = () => this._submitMap();
@@ -741,6 +786,7 @@ input[type=file] { display: none; }
       if (btn) btn.onclick = () => this._setDrawShape(s);
     });
     this._updateActionButtons();
+    this._updateWorkflowStatus();
 
     this._renderBackupPanel();
 
@@ -823,13 +869,19 @@ input[type=file] { display: none; }
     this._selType = null;
     this._selId   = null;
     this._drawPts = [];
+    this._mergeIds = [];
+    this._hasLocalEdits = false;
+    this._splitRegionId = null;
+    this._splitLinePts  = [];
+    this._splitPending  = false;
     this._computeBounds();
     this._resetView();
     this._redraw();
     this._renderSidebar();
     this._renderProps();
     const total = EDITABLE.reduce((s, t) => s + (this._regions[t] || []).length, 0);
-    this._status(`✅ Loaded: ${filename}  (${total} regions)`);
+    this._updateWorkflowStatus();
+    this._status(`✅ Loaded: ${filename}  (${total} editable regions)`);
   }
 
   // ── Coordinate transform ──────────────────────────────────────────────────────
@@ -949,6 +1001,50 @@ input[type=file] { display: none; }
         this._drawInProgressEllipse(ctx);
       } else if (this._drawShape === 'polygon' && this._drawPts.length > 0) {
         this._drawInProgress(ctx);
+      }
+    }
+
+    // Split overlay (highlight target zone + draw split polyline)
+    if ((this._mode === 'split' || this._splitPending) && this._splitRegionId) {
+      const sr = this._getRegion('region_work', this._splitRegionId);
+      if (sr) {
+        // Highlight the zone
+        this._drawPoly(ctx, sr._parsedPoints, 'rgba(255,220,0,0.25)', '#FFD700', false);
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([]);
+        const [fx, fy] = this._m2c(...sr._parsedPoints[0]);
+        ctx.beginPath(); ctx.moveTo(fx, fy);
+        for (let i = 1; i < sr._parsedPoints.length; i++) {
+          const [px, py] = this._m2c(...sr._parsedPoints[i]); ctx.lineTo(px, py);
+        }
+        ctx.closePath(); ctx.stroke();
+      }
+      const pts = this._splitLinePts;
+      if (pts.length > 0) {
+        ctx.setLineDash([7, 4]);
+        ctx.strokeStyle = '#FF6600';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        const [fx, fy] = this._m2c(...pts[0]); ctx.moveTo(fx, fy);
+        for (let i = 1; i < pts.length; i++) {
+          const [px, py] = this._m2c(...pts[i]); ctx.lineTo(px, py);
+        }
+        if (this._mode === 'split' && !this._splitPending && this._mouseMap) {
+          const [mx, my] = this._m2c(...this._mouseMap); ctx.lineTo(mx, my);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Vertex dots
+        for (let i = 0; i < pts.length; i++) {
+          const [px, py] = this._m2c(...pts[i]);
+          ctx.fillStyle = i === 0 ? '#fff' : '#FF6600';
+          ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+        }
+        // Point counter
+        ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '11px sans-serif';
+        const [lx, ly] = this._m2c(...pts[pts.length - 1]);
+        ctx.fillText(`${pts.length} pt${pts.length > 1 ? 's' : ''}`, lx + 8, ly - 6);
       }
     }
 
@@ -1249,6 +1345,84 @@ input[type=file] { display: none; }
     if (ev.button !== 0) return;
     const [cx, cy] = this._canvasPos(ev);
 
+    // ── Merge mode ──
+    if (this._mode === 'merge') {
+      const hit = this._hitRegion(cx, cy);
+      if (!hit || hit.type !== 'region_work') {
+        this._status('⚠️ Merge mode: select work zones only');
+        return;
+      }
+
+      const id = hit.id;
+      if (this._mergeIds.includes(id)) {
+        this._mergeIds = this._mergeIds.filter(mid => mid !== id);
+      } else if (this._mergeIds.length < 2) {
+        this._mergeIds.push(id);
+      } else {
+        this._mergeIds = [this._mergeIds[1], id];
+      }
+
+      this._selType = 'region_work';
+      this._selId = id;
+
+      if (this._mergeIds.length === 2) {
+        const [idA, idB] = this._mergeIds;
+        const a = this._getRegion('region_work', idA);
+        const b = this._getRegion('region_work', idB);
+        if (!a || !b || !this._areWorkRegionsAdjacent(a, b)) {
+          this._mergeIds = [id];
+          this._status('⚠️ Selected work zones are not adjacent. Pick neighboring zones.');
+        } else {
+          this._status(`🔗 Merge ready for work zones ${idA} and ${idB}. Submit map to send merge request.`);
+        }
+      } else {
+        this._status('🔗 Merge mode: select one more adjacent work zone');
+      }
+
+      this._renderSidebar();
+      this._renderProps();
+      this._updateWorkflowStatus();
+      this._redraw();
+      return;
+    }
+
+    // ── Split mode ──
+    if (this._mode === 'split') {
+      if (this._splitPending) {
+        this._status('⚠️ Split is pending. Submit map or reset before making changes.');
+        return;
+      }
+      const hit = this._hitRegion(cx, cy);
+      if (!this._splitRegionId) {
+        // Phase 1: select the zone to split
+        if (!hit || hit.type !== 'region_work') {
+          this._status('⚠️ Split mode: click a work zone to select it for splitting');
+          return;
+        }
+        this._splitRegionId = hit.id;
+        this._splitLinePts  = [];
+        this._selType = 'region_work';
+        this._selId   = hit.id;
+        this._status(`✂ Work zone selected. Click once to set start point, then once more to set end and finalize.`);
+        this._renderSidebar();
+        this._renderProps();
+        this._updateWorkflowStatus();
+        this._redraw();
+      } else {
+        // Phase 2: add line points (max 2 — second point auto-finalizes)
+        this._splitLinePts.push(this._c2m(cx, cy));
+        if (this._splitLinePts.length === 2) {
+          this._finishSplit();
+        } else {
+          this._status('✂ Start point set. Click end point to finalize split.');
+          this._updateWorkflowStatus();
+          this._updateActionButtons();
+          this._redraw();
+        }
+      }
+      return;
+    }
+
     // ── Draw mode ──
     if (this._mode === 'draw') {
       if (this._drawShape === 'circle' || this._drawShape === 'ellipse') {
@@ -1263,6 +1437,7 @@ input[type=file] { display: none; }
         const [fpx, fpy] = this._m2c(...this._drawPts[0]);
         if ((cx - fpx) ** 2 + (cy - fpy) ** 2 < 100) { this._finishDraw(); return; }
       }
+      if (!this._markEdited()) return;
       this._drawPts.push(this._c2m(cx, cy));
       this._redraw();
       return;
@@ -1336,6 +1511,7 @@ input[type=file] { display: none; }
       case 'vertex': {
         const r = this._selRegion();
         if (r) {
+          if (!this._markEdited()) return;
           r._parsedPoints[this._drag.vi] = this._c2m(cx, cy);
           this._syncRegionDerivedFields(this._selType, r);
           this._renderProps();
@@ -1346,6 +1522,7 @@ input[type=file] { display: none; }
       case 'move': {
         const r = this._selRegion();
         if (r) {
+          if (!this._markEdited()) return;
           const [mx, my] = this._c2m(cx, cy);
           const dx = mx - this._drag.smx, dy = my - this._drag.smy;
           r._parsedPoints = this._drag.orig.map(([x, y]) => [x + dx, y + dy]);
@@ -1404,10 +1581,13 @@ input[type=file] { display: none; }
         break;
       case 'Enter':
         if (this._mode === 'draw') this._finishDraw();
+        else if (this._mode === 'split') this._finishSplit();
         break;
       case 'z': case 'Z':
         if (this._mode === 'draw') {
           this._undoPoint();
+        } else if (this._mode === 'split') {
+          this._undoSplitPoint();
         } else if (ev.ctrlKey || ev.metaKey) {
           ev.preventDefault();
           this._undoDelete();
@@ -1436,33 +1616,131 @@ input[type=file] { display: none; }
 
   // ── Mode management ───────────────────────────────────────────────────────────
   _setMode(mode) {
+    if (mode === 'merge') {
+      if (this._hasLocalEdits) {
+        this._status('⚠️ Merge requires a clean map. Submit/reset current edits first.');
+        return;
+      }
+      if (this._splitPending) {
+        this._status('⚠️ Split is pending. Submit map or reset before switching to Merge.');
+        return;
+      }
+    } else if (mode === 'split') {
+      if (this._hasLocalEdits) {
+        this._status('⚠️ Split requires a clean map. Submit/reset current edits first.');
+        return;
+      }
+      if (this._mergeIds.length === 2) {
+        this._status('⚠️ Merge is pending. Submit map or reset before switching to Split.');
+        return;
+      }
+    } else if (this._mergeIds.length === 2 && (mode === 'draw' || mode === 'delete')) {
+      this._status('⚠️ Merge is pending. Submit map or reset before making other changes.');
+      return;
+    } else if (this._splitPending && (mode === 'draw' || mode === 'delete')) {
+      this._status('⚠️ Split is pending. Submit map or reset before making other changes.');
+      return;
+    }
+
     const prev = this._mode;
     this._mode = mode;
     if (prev === 'draw' && mode !== 'draw') { this._drawPts = []; this._drawAnchor = null; }
-    ['select', 'draw', 'delete'].forEach(m => {
+    // Leaving split mode without a finalized line clears the in-progress drawing
+    if (prev === 'split' && mode !== 'split' && !this._splitPending) {
+      this._splitRegionId = null;
+      this._splitLinePts  = [];
+    }
+    ['select', 'merge', 'split', 'draw', 'delete'].forEach(m => {
       const b = this.shadowRoot.getElementById(`mode-${m}`);
       if (b) b.classList.toggle('active', m === mode);
     });
-    const cursors = { select: 'default', draw: 'crosshair', delete: 'not-allowed' };
+    const cursors = { select: 'default', merge: 'copy', split: 'crosshair', draw: 'crosshair', delete: 'not-allowed' };
     this._ca.style.cursor = cursors[mode] || 'default';
     this._hint.classList.toggle('on', mode === 'draw');
     if (mode === 'draw') this._updateDrawHint();
     this._updateActionButtons();
+    this._updateWorkflowStatus();
     this._redraw();
   }
 
   _updateActionButtons() {
-    const draw     = this._mode === 'draw';
-    const polyDraw = draw && this._drawShape === 'polygon';
-    const undoEnabled = polyDraw || this._mode === 'delete';
+    const draw        = this._mode === 'draw';
+    const splitMode   = this._mode === 'split';
+    const polyDraw    = draw && this._drawShape === 'polygon';
+    const mergePending = this._mergeIds.length === 2;
+    const splitLinePts = this._splitLinePts.length;
+    const anyPending  = mergePending || this._splitPending;
+    const undoEnabled = polyDraw || this._mode === 'delete'
+      || (splitMode && (this._splitLinePts.length > 0 || this._splitPending));
 
     const undoBtn   = this.shadowRoot.getElementById('btn-undo');
     const doneBtn   = this.shadowRoot.getElementById('btn-finish');
     const cancelBtn = this.shadowRoot.getElementById('btn-cancel');
+    const drawBtn   = this.shadowRoot.getElementById('mode-draw');
+    const deleteBtn = this.shadowRoot.getElementById('mode-delete');
+    const mergeBtn  = this.shadowRoot.getElementById('mode-merge');
+    const splitBtn  = this.shadowRoot.getElementById('mode-split');
 
     if (undoBtn)   undoBtn.disabled   = !undoEnabled;
     if (doneBtn)   doneBtn.disabled   = !polyDraw;
-    if (cancelBtn) cancelBtn.disabled = !draw;
+    if (cancelBtn) cancelBtn.disabled = !(draw || splitMode);
+    if (drawBtn)   drawBtn.disabled   = anyPending;
+    if (deleteBtn) deleteBtn.disabled = anyPending;
+    if (mergeBtn)  mergeBtn.disabled  = this._hasLocalEdits || this._splitPending;
+    if (splitBtn)  splitBtn.disabled  = this._hasLocalEdits || mergePending;
+    this._updateWorkflowStatus();
+  }
+
+  _updateWorkflowStatus() {
+    if (!this._workflowStatus) return;
+
+    this._workflowStatus.classList.remove('clean', 'edited', 'merge');
+
+    if (this._splitPending) {
+      this._workflowStatus.classList.add('merge');
+      this._workflowStatus.textContent = `State: Split pending (zone ${this._splitRegionId}, ${this._splitLinePts.length} pts — submit to send)`;
+      return;
+    }
+
+    if (this._mode === 'split' && this._splitLinePts.length > 0) {
+      this._workflowStatus.classList.add('merge');
+      this._workflowStatus.textContent = `State: Split drawing (zone ${this._splitRegionId}, ${this._splitLinePts.length} pts)`;
+      return;
+    }
+
+    if (this._mode === 'split' && this._splitRegionId) {
+      this._workflowStatus.classList.add('merge');
+      this._workflowStatus.textContent = `State: Split select zone ${this._splitRegionId} — draw line across it`;
+      return;
+    }
+
+    if (this._mode === 'split') {
+      this._workflowStatus.classList.add('merge');
+      this._workflowStatus.textContent = 'State: Split — click a work zone to start';
+      return;
+    }
+
+    if (this._mergeIds.length === 2) {
+      const [a, b] = this._mergeIds;
+      this._workflowStatus.classList.add('merge');
+      this._workflowStatus.textContent = `State: Merge pending (${a}, ${b})`;
+      return;
+    }
+
+    if (this._mode === 'merge' && this._mergeIds.length === 1) {
+      this._workflowStatus.classList.add('merge');
+      this._workflowStatus.textContent = `State: Merge select (${this._mergeIds[0]} + ?)`;
+      return;
+    }
+
+    if (this._hasLocalEdits) {
+      this._workflowStatus.classList.add('edited');
+      this._workflowStatus.textContent = 'State: Edited (submit/reset before merge or split)';
+      return;
+    }
+
+    this._workflowStatus.classList.add('clean');
+    this._workflowStatus.textContent = 'State: Clean';
   }
 
   _setDrawShape(shape) {
@@ -1492,6 +1770,35 @@ input[type=file] { display: none; }
     if (this._drawPts.length > 0) { this._drawPts.pop(); this._redraw(); }
   }
 
+  _finishSplit() {
+    if (this._splitPending) { this._status('⚠️ Split already finalized — submit or reset'); return; }
+    if (!this._splitRegionId) { this._status('⚠️ No work zone selected for split'); return; }
+    if (this._splitLinePts.length < 2) { this._status('⚠️ Need at least 2 points for the split line'); return; }
+    this._splitPending = true;
+    this._updateActionButtons();
+    this._status(`✂ Split ready: zone ${this._splitRegionId} with ${this._splitLinePts.length}-point line. Submit map to send.`);
+  }
+
+  _undoSplitPoint() {
+    if (this._splitPending) {
+      // Un-finalize: go back to drawing
+      this._splitPending = false;
+      this._updateActionButtons();
+      this._status('↩ Split un-finalized — keep adding points or Done when ready');
+      return;
+    }
+    if (this._splitLinePts.length > 0) {
+      this._splitLinePts.pop();
+      this._updateActionButtons();
+      this._redraw();
+    } else if (this._splitRegionId) {
+      this._splitRegionId = null;
+      this._updateWorkflowStatus();
+      this._redraw();
+      this._status('↩ Zone deselected — click a work zone to start split');
+    }
+  }
+
   _finishDraw() {
     if (this._drawPts.length < 3) { this._status('⚠️ Need at least 3 points'); return; }
     if (!DRAWABLE.includes(this._drawType)) {
@@ -1506,6 +1813,7 @@ input[type=file] { display: none; }
       pts.push([...pts[0]]);
     }
     const r = this._makeRegion(this._drawType, pts);
+    if (!this._markEdited()) return;
     this._regions[this._drawType].push(r);
     this._drawPts = [];
     this._selType = this._drawType;
@@ -1517,6 +1825,17 @@ input[type=file] { display: none; }
   }
 
   _cancelDraw() {
+    if (this._mode === 'split') {
+      if (this._splitLinePts.length > 0 || this._splitRegionId) {
+        this._splitRegionId = null;
+        this._splitLinePts  = [];
+        this._splitPending  = false;
+        this._redraw();
+        this._updateActionButtons();
+        this._status('Split cancelled');
+      }
+      return;
+    }
     if (this._drawPts.length > 0 || this._drawAnchor) {
       this._drawPts    = [];
       this._drawAnchor = null;
@@ -1564,6 +1883,7 @@ input[type=file] { display: none; }
       return;
     }
     const r = this._makeRegion(this._drawType, pts);
+    if (!this._markEdited()) return;
     this._regions[this._drawType].push(r);
     this._selType = this._drawType;
     this._selId   = r.id;
@@ -1636,6 +1956,7 @@ input[type=file] { display: none; }
     const list = this._regions[type] || [];
     const idx  = list.findIndex(r => r.id === id);
     if (idx === -1) return;
+    if (!this._markEdited()) return;
     const [removed] = list.splice(idx, 1);
     if (this._selId === id && this._selType === type) { this._selType = null; this._selId = null; }
     this._deletedStack.push({ type, region: removed, idx });
@@ -1650,6 +1971,7 @@ input[type=file] { display: none; }
   _undoDelete() {
     if (!this._deletedStack.length) { this._status('Nothing to undo'); return; }
     const { type, region, idx } = this._deletedStack.pop();
+    this._markEdited();
     const list = this._regions[type] || [];
     list.splice(Math.min(idx, list.length), 0, region);
     this._selType = type;
@@ -1676,11 +1998,9 @@ input[type=file] { display: none; }
       return;
     }
     let html = '';
-    for (const t of EDITABLE) {
+    for (const t of DELETABLE) {
       const cfg = REGION_CONFIG[t];
       const list = this._regions[t] || [];
-      const canDelete = DELETABLE.includes(t);
-      const canRename = false;
       html += `<div class="grp-hdr">
         <span class="dot" style="background:${cfg.stroke}"></span>
         ${cfg.icon} ${cfg.label}
@@ -1689,10 +2009,12 @@ input[type=file] { display: none; }
       </div>`;
       for (const r of list) {
         const sel  = r.id === this._selId && t === this._selType;
+        const mergeSel = t === 'region_work' && this._mergeIds.includes(r.id);
         const name = r.name || `…${String(r.id).slice(-7)}`;
-        html += `<div class="ri${sel ? ' sel' : ''}" data-type="${t}" data-id="${r.id}">
+        const canRename = t === 'region_work';
+        html += `<div class="ri${sel || mergeSel ? ' sel' : ''}" data-type="${t}" data-id="${r.id}">
           <span class="rn" ${canRename ? 'title="Double-click to rename"' : ''}>${escHtml(name)}</span>
-          ${canDelete ? `<button class="rdel" data-type="${t}" data-id="${r.id}" title="Delete">✕</button>` : ''}
+          <button class="rdel" data-type="${t}" data-id="${r.id}" title="Delete">✕</button>
         </div>`;
       }
     }
@@ -1728,7 +2050,7 @@ input[type=file] { display: none; }
       });
 
       const nameEl = el.querySelector('.rn');
-      if (nameEl && el.dataset.type === 'region_work' && MODIFIABLE.includes('region_work')) {
+      if (nameEl && el.dataset.type === 'region_work') {
         nameEl.addEventListener('dblclick', ev => {
           ev.stopPropagation();
           const id = Number(el.dataset.id);
@@ -1742,6 +2064,10 @@ input[type=file] { display: none; }
 
           const commit = () => {
             const next = input.value.trim();
+            if (next !== (region.name || '') && !this._markEdited()) {
+              this._renderSidebar();
+              return;
+            }
             region.name = next;
             this._renderSidebar();
             if (this._selType === 'region_work' && this._selId === id) this._renderProps();
@@ -1803,7 +2129,15 @@ input[type=file] { display: none; }
     panel.innerHTML = html;
 
     const ni = panel.querySelector('#p-name');
-    if (ni) ni.addEventListener('input', e => { r.name = e.target.value; this._renderSidebar(); this._redraw(); });
+    if (ni) ni.addEventListener('input', e => {
+      if (r.name !== e.target.value && !this._markEdited()) {
+        e.target.value = r.name || '';
+        return;
+      }
+      r.name = e.target.value;
+      this._renderSidebar();
+      this._redraw();
+    });
   }
 
   _centerOn(type, id) {
@@ -1841,6 +2175,25 @@ input[type=file] { display: none; }
       return copy;
     });
     out.update_time = now;
+    if (this._mergeIds.length === 2) {
+      out.merge_region_ids = [...this._mergeIds];
+      out.merge_regionsid = [...this._mergeIds];
+    } else {
+      delete out.merge_region_ids;
+      delete out.merge_regionsid;
+    }
+    if (this._splitPending && this._splitRegionId && this._splitLinePts.length >= 2) {
+      out.split_region_id  = this._splitRegionId;
+      out.split_regionid   = this._splitRegionId;
+      out.split_line       = this._splitLinePts.map(([x, y]) => [
+        Math.round(x * 1000) / 1000,
+        Math.round(y * 1000) / 1000,
+      ]);
+    } else {
+      delete out.split_region_id;
+      delete out.split_regionid;
+      delete out.split_line;
+    }
     return out;
   }
 
@@ -1864,6 +2217,31 @@ input[type=file] { display: none; }
     const out = this._buildMapPayload();
     if (!out) { this._status('⚠️ No map loaded'); return; }
 
+    if (this._mergeIds.length === 2) {
+      const [idA, idB] = this._mergeIds;
+      const a = this._getRegion('region_work', idA);
+      const b = this._getRegion('region_work', idB);
+      if (!a || !b || !this._areWorkRegionsAdjacent(a, b)) {
+        this._status('⚠️ Merge zones are no longer valid/adjacent. Re-select merge zones.');
+        return;
+      }
+      if (this._hasLocalEdits) {
+        this._status('⚠️ Merge request must be submitted before making other edits.');
+        return;
+      }
+    }
+
+    if (this._splitPending) {
+      if (!this._splitRegionId || this._splitLinePts.length < 2) {
+        this._status('⚠️ Split data is invalid. Re-draw the split line.');
+        return;
+      }
+      if (!this._getRegion('region_work', this._splitRegionId)) {
+        this._status('⚠️ Split zone no longer exists. Re-select a zone.');
+        return;
+      }
+    }
+
     // Keep editor map stable while backend persists and updates entity attributes.
     this._submittedMapSignature = JSON.stringify(out);
     this._ignoreEntityMapUntil = Date.now() + 6000;
@@ -1878,7 +2256,15 @@ input[type=file] { display: none; }
         entity_id: this._config.entity,
         map: out,
       });
+      this._hasLocalEdits = false;
+      this._mergeIds = [];
+      this._splitRegionId = null;
+      this._splitLinePts  = [];
+      this._splitPending  = false;
+      this._updateActionButtons();
+      this._renderSidebar();
       this._status(`☁ Submitted map to ${SERVICE_DOMAIN}.${SERVICE_SET_MAP} (${this._config.entity})`);
+      this._updateWorkflowStatus();
     } catch (err) {
       this._status(`❌ Submit failed: ${err?.message || err}`);
     }
@@ -1908,7 +2294,7 @@ input[type=file] { display: none; }
     this._selType      = null;
     this._selId        = null;
     this._mode         = 'select';
-    this._drawType     = 'region_channel';
+    this._drawType     = 'region_work';
     this._drawPts      = [];
     this._drawShape    = 'polygon';
     this._drawAnchor   = null;
@@ -1920,6 +2306,11 @@ input[type=file] { display: none; }
     this._drag         = null;
     this._deletedStack = [];
     this._lastEntityKey = null;
+    this._hasLocalEdits = false;
+    this._mergeIds = [];
+    this._splitRegionId = null;
+    this._splitLinePts  = [];
+    this._splitPending  = false;
 
     // Reset post-submit markers to allow immediate reload
     this._ignoreEntityMapUntil = 0;
@@ -1939,6 +2330,7 @@ input[type=file] { display: none; }
       if (b) b.classList.toggle('active', s === 'polygon');
     });
     this._updateActionButtons();
+    this._updateWorkflowStatus();
     this._status('🔄 Reloading from entity...');
 
     // Force reload from entity attribute
@@ -2134,6 +2526,146 @@ input[type=file] { display: none; }
   }
 
   _status(msg) { if (this._stbar) this._stbar.textContent = msg; }
+
+  _markEdited() {
+    if (this._mergeIds.length === 2) {
+      this._status('⚠️ Merge is pending. Submit map or reset before making other changes.');
+      return false;
+    }
+    if (this._splitPending) {
+      this._status('⚠️ Split is pending. Submit map or reset before making other changes.');
+      return false;
+    }
+    this._hasLocalEdits = true;
+    this._updateActionButtons();
+    this._updateWorkflowStatus();
+    return true;
+  }
+
+  _workPoints(region) {
+    if (!region || !Array.isArray(region._parsedPoints)) return [];
+    const pts = region._parsedPoints;
+    if (pts.length > 2) {
+      const first = pts[0];
+      const last = pts[pts.length - 1];
+      if (first[0] === last[0] && first[1] === last[1]) return pts.slice(0, -1);
+    }
+    return pts;
+  }
+
+  _segments(points) {
+    const segs = [];
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      const b = points[(i + 1) % points.length];
+      segs.push([a, b]);
+    }
+    return segs;
+  }
+
+  _boundsOf(points) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const [x, y] of points) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
+  _boundsNear(a, b, tol) {
+    return !(
+      a.maxX < b.minX - tol ||
+      b.maxX < a.minX - tol ||
+      a.maxY < b.minY - tol ||
+      b.maxY < a.minY - tol
+    );
+  }
+
+  _orient(a, b, c) {
+    return (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1]);
+  }
+
+  _onSeg(a, b, p, tol) {
+    return (
+      p[0] <= Math.max(a[0], b[0]) + tol &&
+      p[0] >= Math.min(a[0], b[0]) - tol &&
+      p[1] <= Math.max(a[1], b[1]) + tol &&
+      p[1] >= Math.min(a[1], b[1]) - tol
+    );
+  }
+
+  _segmentsIntersect(a1, a2, b1, b2, tol) {
+    const o1 = this._orient(a1, a2, b1);
+    const o2 = this._orient(a1, a2, b2);
+    const o3 = this._orient(b1, b2, a1);
+    const o4 = this._orient(b1, b2, a2);
+
+    if (Math.abs(o1) <= tol && this._onSeg(a1, a2, b1, tol)) return true;
+    if (Math.abs(o2) <= tol && this._onSeg(a1, a2, b2, tol)) return true;
+    if (Math.abs(o3) <= tol && this._onSeg(b1, b2, a1, tol)) return true;
+    if (Math.abs(o4) <= tol && this._onSeg(b1, b2, a2, tol)) return true;
+
+    return (o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0);
+  }
+
+  _distSq(a, b) {
+    const dx = a[0] - b[0];
+    const dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+  }
+
+  _pointSegDistSq(p, a, b) {
+    const vx = b[0] - a[0];
+    const vy = b[1] - a[1];
+    const len2 = vx * vx + vy * vy;
+    if (len2 === 0) return this._distSq(p, a);
+    let t = ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const proj = [a[0] + t * vx, a[1] + t * vy];
+    return this._distSq(p, proj);
+  }
+
+  _segmentsDistanceSq(a1, a2, b1, b2) {
+    return Math.min(
+      this._pointSegDistSq(a1, b1, b2),
+      this._pointSegDistSq(a2, b1, b2),
+      this._pointSegDistSq(b1, a1, a2),
+      this._pointSegDistSq(b2, a1, a2)
+    );
+  }
+
+  _areWorkRegionsAdjacent(regionA, regionB) {
+    const ptsA = this._workPoints(regionA);
+    const ptsB = this._workPoints(regionB);
+    if (ptsA.length < 3 || ptsB.length < 3) return false;
+
+    const span = Math.max(
+      this._bounds.maxX - this._bounds.minX,
+      this._bounds.maxY - this._bounds.minY,
+      1
+    );
+    const tol = Math.max(span * 0.001, 0.02);
+    const tolSq = tol * tol;
+
+    const bA = this._boundsOf(ptsA);
+    const bB = this._boundsOf(ptsB);
+    if (!this._boundsNear(bA, bB, tol)) return false;
+
+    const segA = this._segments(ptsA);
+    const segB = this._segments(ptsB);
+    for (const [a1, a2] of segA) {
+      for (const [b1, b2] of segB) {
+        if (this._segmentsIntersect(a1, a2, b1, b2, tol)) return true;
+        if (this._segmentsDistanceSq(a1, a2, b1, b2) <= tolSq) return true;
+      }
+    }
+    return false;
+  }
 }
 
 
