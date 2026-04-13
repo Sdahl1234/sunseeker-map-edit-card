@@ -76,10 +76,21 @@ function parsePoints(str) {
 }
 
 function stringifyPoints(pts) {
-  return JSON.stringify(pts.map(([x, y]) => [
+  const normalized = ensureClosedPoints(pts);
+  return JSON.stringify(normalized.map(([x, y]) => [
     Math.round(x * 1000) / 1000,
     Math.round(y * 1000) / 1000,
   ]));
+}
+
+function ensureClosedPoints(pts) {
+  const out = Array.isArray(pts) ? pts.map(([x, y]) => [Number(x), Number(y)]) : [];
+  if (out.length > 2) {
+    const [fx, fy] = out[0];
+    const [lx, ly] = out[out.length - 1];
+    if (fx !== lx || fy !== ly) out.push([fx, fy]);
+  }
+  return out;
 }
 
 function escHtml(s) {
@@ -786,6 +797,7 @@ input[type=file] { display: none; }
     this.shadowRoot.getElementById('reload-btn').onclick  = () => this._resetAndReload();
     this.shadowRoot.getElementById('backup-btn').onclick  = () => this._backupCurrentMap();
     this.shadowRoot.getElementById('draw-type').onchange  = e => { this._drawType = e.target.value; };
+    this._syncDrawTypeControl();
     ['polygon', 'circle', 'ellipse'].forEach(s => {
       const btn = this.shadowRoot.getElementById(`shape-${s}`);
       if (btn) btn.onclick = () => this._setDrawShape(s);
@@ -841,6 +853,18 @@ input[type=file] { display: none; }
     if (saveBtn) saveBtn.style.display = debug ? 'inline-block' : 'none';
   }
 
+  _syncDrawTypeControl() {
+    const select = this.shadowRoot?.getElementById('draw-type');
+    if (!select) return;
+
+    // Keep UI and internal draw type aligned even if user has not touched dropdown yet.
+    const hasOption = Array.from(select.options).some(opt => opt.value === this._drawType);
+    if (!hasOption) {
+      this._drawType = select.value || select.options?.[0]?.value || 'region_forbidden';
+    }
+    select.value = this._drawType;
+  }
+
   // ── File loading ─────────────────────────────────────────────────────────────
   _loadFile(ev) {
     const file = ev.target.files[0];
@@ -865,7 +889,7 @@ input[type=file] { display: none; }
       this._regions[t] = (data[t] || []).map(r => {
         const region = {
           ...r,
-          _parsedPoints: parsePoints(r.points),
+          _parsedPoints: ensureClosedPoints(parsePoints(r.points)),
         };
         if (t === 'region_work' && typeof region.name !== 'string') region.name = '';
         return region;
@@ -1517,7 +1541,24 @@ input[type=file] { display: none; }
         const r = this._selRegion();
         if (r) {
           if (!this._markEdited()) return;
-          r._parsedPoints[this._drag.vi] = this._c2m(cx, cy);
+          const nextPoint = this._c2m(cx, cy);
+          const pts = r._parsedPoints;
+          const lastIdx = pts.length - 1;
+          const wasClosed = pts.length > 2 &&
+            pts[0][0] === pts[lastIdx][0] &&
+            pts[0][1] === pts[lastIdx][1];
+
+          // Keep first/last in sync when editing a closed polygon endpoint.
+          if (wasClosed && this._drag.vi === 0) {
+            pts[0] = nextPoint;
+            pts[lastIdx] = [...nextPoint];
+          } else if (wasClosed && this._drag.vi === lastIdx) {
+            pts[lastIdx] = nextPoint;
+            pts[0] = [...nextPoint];
+          } else {
+            pts[this._drag.vi] = nextPoint;
+          }
+          this._normalizeRegionPoints(r);
           this._syncRegionDerivedFields(this._selType, r);
           this._renderProps();
           this._redraw();
@@ -1902,13 +1943,14 @@ input[type=file] { display: none; }
     this._idOffset++;
     const id = Date.now() + this._idOffset;
     const cfg = REGION_CONFIG[type];
+    const normalizedPoints = ensureClosedPoints(points);
     const base = {
       center_point: { x: 0.0, y: 0.0 },
       effective_area: cfg.effective_area,
       id,
-      points: stringifyPoints(points),
-      points_num: points.length,
-      _parsedPoints: points,
+      points: stringifyPoints(normalizedPoints),
+      points_num: normalizedPoints.length,
+      _parsedPoints: normalizedPoints,
     };
     switch (type) {
       case 'region_work': {
@@ -1937,6 +1979,7 @@ input[type=file] { display: none; }
 
   _syncRegionDerivedFields(type, region) {
     if (!region || !Array.isArray(region._parsedPoints)) return;
+    this._normalizeRegionPoints(region);
     if (type === 'region_work') {
       const area = this._polygonArea(region._parsedPoints);
       region.area_size             = area;
@@ -1944,6 +1987,11 @@ input[type=file] { display: none; }
       region.time_fine_tune        = Math.round(area * (5 / 7)    * 1000) / 1000;
       region.time_high_efficiency  = Math.round(area * (1 / 2.7)  * 1000) / 1000;
     }
+  }
+
+  _normalizeRegionPoints(region) {
+    if (!region || !Array.isArray(region._parsedPoints)) return;
+    region._parsedPoints = ensureClosedPoints(region._parsedPoints);
   }
 
   _polygonArea(points) {
@@ -2168,8 +2216,9 @@ input[type=file] { display: none; }
       out[t] = (this._regions[t] || []).map((r, i) => {
         const copy = { ...r };
         delete copy._parsedPoints;
-        copy.points     = stringifyPoints(r._parsedPoints);
-        copy.points_num = r._parsedPoints.length;
+        const normalizedPoints = ensureClosedPoints(r._parsedPoints);
+        copy.points     = stringifyPoints(normalizedPoints);
+        copy.points_num = normalizedPoints.length;
         return copy;
       });
     }
@@ -2210,17 +2259,34 @@ input[type=file] { display: none; }
       return;
     }
 
+    // If a polygon is currently being drawn, commit it before submit so it is included in payload.
+    if (this._mode === 'draw' && this._drawShape === 'polygon' && this._drawPts.length > 0) {
+      if (this._drawPts.length < 3) {
+        this._status('⚠️ Finish drawing first (at least 3 points) or cancel before submit.');
+        return;
+      }
+      this._finishDraw();
+    }
+
+    const out = this._buildMapPayload();
+    if (!out) { this._status('⚠️ No map loaded'); return; }
+
+    const summary = [
+      `Work: ${(out.region_work || []).length}`,
+      `Forbidden: ${(out.region_forbidden || []).length}`,
+      `Passage: ${(out.region_channel || []).length}`,
+      `Obstacle: ${(out.region_obstacle || []).length}`,
+      `Safe: ${(out.region_placed_blank || []).length}`,
+    ].join('  |  ');
+
     const ok = await this._confirmAction(
       'Submit map',
-      `Submit current map?`
+      `Submit current map?\n${summary}`
     );
     if (!ok) {
       this._status('Submit cancelled');
       return;
     }
-
-    const out = this._buildMapPayload();
-    if (!out) { this._status('⚠️ No map loaded'); return; }
 
     if (this._mergeIds.length === 2) {
       const [idA, idB] = this._mergeIds;
@@ -2334,6 +2400,7 @@ input[type=file] { display: none; }
       const b = this.shadowRoot.getElementById(`shape-${s}`);
       if (b) b.classList.toggle('active', s === 'polygon');
     });
+    this._syncDrawTypeControl();
     this._updateActionButtons();
     this._updateWorkflowStatus();
     this._status('🔄 Reloading from entity...');
