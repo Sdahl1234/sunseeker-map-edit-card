@@ -2456,7 +2456,7 @@ input[type=file] { display: none; }
       const isCurrent = currentMapId && mapId === currentMapId;
       const thumb = escHtml(b.thumbnailUrl || '');
       const name = escHtml(b.mapName || `Backup ${i + 1}`);
-      const createTime = escHtml(b.createTime || '');
+      const displayTime = escHtml(b.updateTime ? this._formatBackupTime(b.updateTime) : (b.createTime || ''));
       const area = b.mapArea != null ? Number(b.mapArea).toFixed(2) : '';
       return `
         <div class="backup-item${isCurrent ? ' current' : ''}">
@@ -2467,7 +2467,7 @@ input[type=file] { display: none; }
           <div class="backup-meta">
             <div><strong>${name}</strong></div>
             <div class="dim">Map ID: ${escHtml(mapId)}</div>
-            <div class="dim">${createTime}${area ? ` · ${area} m²` : ''}</div>
+            <div class="dim">${displayTime}${area ? ` · ${area} m²` : ''}</div>
           </div>
           <div class="backup-actions">
             <button class="btn" data-restore-mapid="${escHtml(mapId)}" ${isCurrent ? 'disabled' : ''}>Restore</button>
@@ -2563,6 +2563,18 @@ input[type=file] { display: none; }
     } catch (err) {
       this._status(`❌ Delete backup failed: ${err?.message || err}`);
     }
+  }
+
+  _formatBackupTime(value) {
+    if (value === undefined || value === null || value === '') return '';
+
+    const ms = Number(value);
+    if (Number.isFinite(ms) && ms > 0) {
+      const dt = new Date(ms);
+      if (!Number.isNaN(dt.getTime())) return dt.toLocaleString();
+    }
+
+    return String(value);
   }
 
   _confirmAction(title, message) {
@@ -2894,7 +2906,7 @@ class SunseekerMapEditCardEditor extends HTMLElement {
     </select>
     <div class="hint">Use side layout for tall/vertical maps.</div>
   </div>
-  Version 1.0.2
+  Version 1.0.3
 </div>`;
 
     const es = this.shadowRoot.getElementById('entity-sel');
