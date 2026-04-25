@@ -52,11 +52,11 @@ const REGION_CONFIG = {
   },
 };
 
-const EDITABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_obstacle', 'region_placed_blank'];
-const DRAWABLE   = ['region_forbidden', 'region_placed_blank', 'region_obstacle', 'region_channel'];
+const EDITABLE   = ['region_work', 'region_channel', 'region_forbidden', 'region_placed_blank'];
+const DRAWABLE   = ['region_forbidden', 'region_placed_blank', 'region_channel'];
 const MODIFIABLE = ['region_channel', 'region_forbidden', 'region_placed_blank'];
-const DELETABLE  = [...EDITABLE];
-const ALL_TYPES  = [...EDITABLE, 'region_charger_channel'];
+const DELETABLE  = [...EDITABLE, 'region_obstacle'];
+const ALL_TYPES  = [...EDITABLE, 'region_obstacle', 'region_charger_channel'];
 const DRAW_ORDER = ['region_work', 'region_charger_channel', 'region_channel', 'region_placed_blank', 'region_forbidden', 'region_obstacle'];
 const HIT_ORDER  = ['region_obstacle', 'region_forbidden', 'region_placed_blank', 'region_channel', 'region_charger_channel', 'region_work'];
 const MAP_ATTR_PRIORITY = ['map_data', 'map', 'map_json', 'mapfile', 'raw_map_data', 'json'];
