@@ -2906,7 +2906,7 @@ class SunseekerMapEditCardEditor extends HTMLElement {
     </select>
     <div class="hint">Use side layout for tall/vertical maps.</div>
   </div>
-  Version 1.0.3
+  Version 1.0.4
 </div>`;
 
     const es = this.shadowRoot.getElementById('entity-sel');
