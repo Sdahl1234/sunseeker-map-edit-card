@@ -2212,8 +2212,8 @@ input[type=file] { display: none; }
     const now = Date.now();
     const out = JSON.parse(JSON.stringify(this._mapData));
 
-    for (const t of EDITABLE) {
-      out[t] = (this._regions[t] || []).map((r, i) => {
+    for (const t of [...EDITABLE, 'region_obstacle']) {
+      out[t] = (this._regions[t] || []).map(r => {
         const copy = { ...r };
         delete copy._parsedPoints;
         const normalizedPoints = ensureClosedPoints(r._parsedPoints);
@@ -2906,7 +2906,7 @@ class SunseekerMapEditCardEditor extends HTMLElement {
     </select>
     <div class="hint">Use side layout for tall/vertical maps.</div>
   </div>
-  Version 1.0.4
+  Version 1.0.5
 </div>`;
 
     const es = this.shadowRoot.getElementById('entity-sel');
