@@ -796,7 +796,17 @@ input[type=file] { display: none; }
     this.shadowRoot.getElementById('save-btn').onclick    = () => this._save();
     this.shadowRoot.getElementById('reload-btn').onclick  = () => this._resetAndReload();
     this.shadowRoot.getElementById('backup-btn').onclick  = () => this._backupCurrentMap();
-    this.shadowRoot.getElementById('draw-type').onchange  = e => { this._drawType = e.target.value; };
+    this.shadowRoot.getElementById('draw-type').onchange  = e => {
+      this._drawType = e.target.value;
+      if (!DRAWABLE.includes(this._drawType) && this._mode === 'draw') {
+        this._drawPts = [];
+        this._drawAnchor = null;
+        this._setMode('select');
+        this._status(`⚠️ ${REGION_CONFIG[this._drawType].label} regions are delete-only`);
+        return;
+      }
+      this._updateActionButtons();
+    };
     this._syncDrawTypeControl();
     ['polygon', 'circle', 'ellipse'].forEach(s => {
       const btn = this.shadowRoot.getElementById(`shape-${s}`);
@@ -1504,6 +1514,7 @@ input[type=file] { display: none; }
       this._selId   = hit.id;
       this._renderSidebar();
       this._renderProps();
+      this._updateActionButtons();
       this._redraw();
       if (MODIFIABLE.includes(hit.type)) {
         const mp = this._c2m(cx, cy);
@@ -1516,6 +1527,7 @@ input[type=file] { display: none; }
       this._drag = { type: 'pan', sx: cx, sy: cy, spx: this._panX, spy: this._panY };
       this._renderSidebar();
       this._renderProps();
+      this._updateActionButtons();
       this._redraw();
     }
   }
@@ -1716,6 +1728,7 @@ input[type=file] { display: none; }
     const mergePending = this._mergeIds.length === 2;
     const splitLinePts = this._splitLinePts.length;
     const anyPending  = mergePending || this._splitPending;
+    const drawBlocked = this._drawType === 'region_obstacle' || this._selType === 'region_obstacle';
     const undoEnabled = polyDraw || this._mode === 'delete'
       || (splitMode && (this._splitLinePts.length > 0 || this._splitPending));
 
@@ -1726,14 +1739,22 @@ input[type=file] { display: none; }
     const deleteBtn = this.shadowRoot.getElementById('mode-delete');
     const mergeBtn  = this.shadowRoot.getElementById('mode-merge');
     const splitBtn  = this.shadowRoot.getElementById('mode-split');
+    const drawType  = this.shadowRoot.getElementById('draw-type');
+    const shapeBtns = ['polygon', 'circle', 'ellipse']
+      .map(shape => this.shadowRoot.getElementById(`shape-${shape}`))
+      .filter(Boolean);
 
     if (undoBtn)   undoBtn.disabled   = !undoEnabled;
-    if (doneBtn)   doneBtn.disabled   = !polyDraw;
-    if (cancelBtn) cancelBtn.disabled = !(draw || splitMode);
-    if (drawBtn)   drawBtn.disabled   = anyPending;
+    if (doneBtn)   doneBtn.disabled   = !polyDraw || drawBlocked;
+    if (cancelBtn) cancelBtn.disabled = (!(draw || splitMode)) || (drawBlocked && !splitMode);
+    if (drawBtn)   drawBtn.disabled   = anyPending || drawBlocked;
     if (deleteBtn) deleteBtn.disabled = anyPending;
     if (mergeBtn)  mergeBtn.disabled  = this._hasLocalEdits || this._splitPending;
     if (splitBtn)  splitBtn.disabled  = this._hasLocalEdits || mergePending;
+    if (drawType)  drawType.disabled  = anyPending || this._selType === 'region_obstacle';
+    shapeBtns.forEach(btn => {
+      btn.disabled = drawBlocked;
+    });
     this._updateWorkflowStatus();
   }
 
@@ -2098,6 +2119,7 @@ input[type=file] { display: none; }
         this._selId   = Number(el.dataset.id);
         this._renderSidebar();
         this._renderProps();
+        this._updateActionButtons();
         this._redraw();
         this._centerOn(this._selType, this._selId);
       });
