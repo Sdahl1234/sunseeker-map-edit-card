@@ -115,7 +115,7 @@ class SunseekerMapEditCard extends HTMLElement {
     // Selection / interaction
     this._selType    = null;
     this._selId      = null;
-    this._mode       = 'select';   // 'select' | 'draw' | 'delete'
+    this._mode       = 'select';   // 'select' | 'draw' | 'delete' | 'merge' | 'split' | 'route'
     this._drawType   = 'region_obstacle';
     this._drawPts    = [];         // points being placed
     this._drawShape  = 'polygon';  // 'polygon' | 'circle' | 'ellipse'
@@ -157,6 +157,9 @@ class SunseekerMapEditCard extends HTMLElement {
     this._splitRegionId  = null;  // selected work zone id
     this._splitLinePts   = [];    // polyline points being drawn / finalized
     this._splitPending   = false; // line finished, awaiting submit
+
+    // Access route for the new work zone (mower drives these before recording the boundary)
+    this._routePts = [];
 
     this._buildUI();
   }
@@ -691,6 +694,7 @@ input[type=file] { display: none; }
     <button class="btn" id="mode-split" title="Draw a split line across one work zone">✂ Split</button>
     <button class="btn del"    id="mode-delete" title="Click to delete region — D">🗑 Delete</button>
     <button class="btn" id="mode-draw"   title="Draw new region — W">✏ Draw</button>
+    <button class="btn" id="mode-route"  title="Draw the route the mower drives from the charger to the new work zone — R">🧭 Route</button>
     <div class="tsep"></div>
     <select class="dt" id="draw-type">
       <option value="region_work">🌱 Work Zone</option>
@@ -783,13 +787,16 @@ input[type=file] { display: none; }
     this.shadowRoot.getElementById('mode-split').onclick  = () => this._setMode('split');
     this.shadowRoot.getElementById('mode-draw').onclick   = () => this._setMode('draw');
     this.shadowRoot.getElementById('mode-delete').onclick = () => this._setMode('delete');
+    this.shadowRoot.getElementById('mode-route').onclick  = () => this._setMode('route');
     this.shadowRoot.getElementById('btn-undo').onclick    = () => {
       if (this._mode === 'draw') this._undoPoint();
       else if (this._mode === 'split') this._undoSplitPoint();
+      else if (this._mode === 'route') this._undoRoutePoint();
       else if (this._mode === 'delete') this._undoDelete();
     };
     this.shadowRoot.getElementById('btn-finish').onclick  = () => {
       if (this._mode === 'split') this._finishSplit();
+      else if (this._mode === 'route') this._finishRoute();
       else this._finishDraw();
     };
     this.shadowRoot.getElementById('btn-cancel').onclick  = () => this._cancelDraw();
@@ -927,6 +934,8 @@ input[type=file] { display: none; }
     this._splitRegionId = null;
     this._splitLinePts  = [];
     this._splitPending  = false;
+    this._routePts      = [];
+    if (this._mode === 'route') this._setMode('select');
     this._computeBounds();
     this._resetView();
     this._redraw();
@@ -1101,10 +1110,13 @@ input[type=file] { display: none; }
       }
     }
 
+    // Access route overlay for the pending new work zone
+    this._drawRoute(ctx);
+
     // Vertex handles on selected region
     if (this._selId && MODIFIABLE.includes(this._selType)) {
       const r = this._selRegion();
-      if (r) this._drawHandles(ctx, r._parsedPoints);
+      if (r && this._canModify(this._selType, r)) this._drawHandles(ctx, r._parsedPoints);
     }
 
     // Coordinate overlay (bottom-right)
@@ -1242,6 +1254,50 @@ input[type=file] { display: none; }
       const [lx, ly] = this._m2c(...pts[pts.length - 1]);
       ctx.fillText(`${pts.length} pts`, lx + 8, ly - 6);
     }
+  }
+
+  _drawRoute(ctx) {
+    const target = this._newWorkRegion();
+    if (!target) return;
+    const pts = this._routePts;
+    const live = this._mode === 'route' && this._mouseMap ? [this._mouseMap] : [];
+    const chargerPoint = this._mapData?.charge_pos?.point || null;
+    const chain = [
+      ...(chargerPoint ? [chargerPoint] : []),
+      ...pts,
+      ...live,
+      ...(target._parsedPoints?.length ? [target._parsedPoints[0]] : []),
+    ];
+    if (chain.length < 2) return;
+
+    ctx.save();
+    ctx.setLineDash([10, 6]);
+    ctx.strokeStyle = '#00E5FF';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    const [sx, sy] = this._m2c(...chain[0]);
+    ctx.moveTo(sx, sy);
+    for (let i = 1; i < chain.length; i++) {
+      const [px, py] = this._m2c(...chain[i]);
+      ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < pts.length; i++) {
+      const [px, py] = this._m2c(...pts[i]);
+      ctx.fillStyle = '#00E5FF';
+      ctx.beginPath();
+      ctx.arc(px, py, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#00343d';
+      ctx.fillText(String(i + 1), px, py);
+    }
+    ctx.textAlign = 'left';
+    ctx.restore();
   }
 
   _drawHandles(ctx, pts) {
@@ -1448,6 +1504,13 @@ input[type=file] { display: none; }
   _selRegion()       { return this._getRegion(this._selType, this._selId); }
   _getRegion(t, id)  { return (this._regions[t] || []).find(r => r.id === id) || null; }
 
+  // The mower cannot re-record an existing work zone, so only new ones stay editable.
+  _canModify(type, region) {
+    if (!MODIFIABLE.includes(type)) return false;
+    if (type !== 'region_work') return true;
+    return Boolean(region?._isNew);
+  }
+
   // ── Mouse events ──────────────────────────────────────────────────────────────
   _onDown(ev) {
     if (ev.button !== 0) return;
@@ -1531,6 +1594,16 @@ input[type=file] { display: none; }
       return;
     }
 
+    // ── Route mode ──
+    if (this._mode === 'route') {
+      this._routePts.push(this._c2m(cx, cy));
+      this._updateActionButtons();
+      this._updateWorkflowStatus();
+      this._redraw();
+      this._status(`🧭 Route point ${this._routePts.length} added — Done when the route reaches the new zone`);
+      return;
+    }
+
     // ── Draw mode ──
     if (this._mode === 'draw') {
       if (this._drawShape === 'circle' || this._drawShape === 'ellipse') {
@@ -1562,7 +1635,7 @@ input[type=file] { display: none; }
     const selR = this._selRegion();
 
     // Ctrl/Cmd + click on an edge inserts a new vertex on selected editable polygons.
-    if (selR && MODIFIABLE.includes(this._selType) && (ev.ctrlKey || ev.metaKey)) {
+    if (selR && this._canModify(this._selType, selR) && (ev.ctrlKey || ev.metaKey)) {
       const insertAt = this._hitEdgeInsertIndex(cx, cy, selR);
       if (insertAt >= 0) {
         if (!this._markEdited(this._selType)) return;
@@ -1578,7 +1651,7 @@ input[type=file] { display: none; }
     }
 
     // Vertex drag
-    if (selR && MODIFIABLE.includes(this._selType)) {
+    if (selR && this._canModify(this._selType, selR)) {
       const vi = this._hitVertex(cx, cy, selR);
       if (vi >= 0) {
         this._drag = { type: 'vertex', vi, orig: selR._parsedPoints.map(p => [...p]) };
@@ -1604,7 +1677,7 @@ input[type=file] { display: none; }
       if (MODIFIABLE.includes(hit.type)) {
         const mp = this._c2m(cx, cy);
         const r2 = this._getRegion(hit.type, hit.id);
-        if (r2) this._drag = { type: 'move', smx: mp[0], smy: mp[1], orig: r2._parsedPoints.map(p => [...p]) };
+        if (r2 && this._canModify(hit.type, r2)) this._drag = { type: 'move', smx: mp[0], smy: mp[1], orig: r2._parsedPoints.map(p => [...p]) };
       }
     } else {
       // Pan
@@ -1725,12 +1798,15 @@ input[type=file] { display: none; }
       case 'Enter':
         if (this._mode === 'draw') this._finishDraw();
         else if (this._mode === 'split') this._finishSplit();
+        else if (this._mode === 'route') this._finishRoute();
         break;
       case 'z': case 'Z':
         if (this._mode === 'draw') {
           this._undoPoint();
         } else if (this._mode === 'split') {
           this._undoSplitPoint();
+        } else if (this._mode === 'route') {
+          this._undoRoutePoint();
         } else if (ev.ctrlKey || ev.metaKey) {
           ev.preventDefault();
           this._undoDelete();
@@ -1738,6 +1814,9 @@ input[type=file] { display: none; }
         break;
       case 's': case 'S':
         this._setMode('select');
+        break;
+      case 'r': case 'R':
+        this._setMode('route');
         break;
       case 'd': case 'D':
         this._setMode('delete');
@@ -1759,6 +1838,10 @@ input[type=file] { display: none; }
 
   // ── Mode management ───────────────────────────────────────────────────────────
   _setMode(mode) {
+    if (mode === 'route' && !this._newWorkRegion()) {
+      this._status('⚠️ Draw the new work zone first — a route is only needed to reach a new zone.');
+      return;
+    }
     if (mode === 'draw' && this._drawType === 'region_work' && this._hasLocalEdits && this._editScope !== 'work') {
       this._status('⚠️ Work zone edits require a clean map. Submit/reset current edits first.');
       return;
@@ -1797,14 +1880,14 @@ input[type=file] { display: none; }
       this._splitRegionId = null;
       this._splitLinePts  = [];
     }
-    ['select', 'merge', 'split', 'draw', 'delete'].forEach(m => {
+    ['select', 'merge', 'split', 'draw', 'delete', 'route'].forEach(m => {
       const b = this.shadowRoot.getElementById(`mode-${m}`);
       if (b) b.classList.toggle('active', m === mode);
     });
-    const cursors = { select: 'default', merge: 'copy', split: 'crosshair', draw: 'crosshair', delete: 'not-allowed' };
+    const cursors = { select: 'default', merge: 'copy', split: 'crosshair', draw: 'crosshair', route: 'crosshair', delete: 'not-allowed' };
     this._ca.style.cursor = cursors[mode] || 'default';
-    this._hint.classList.toggle('on', mode === 'draw');
-    if (mode === 'draw') this._updateDrawHint();
+    this._hint.classList.toggle('on', mode === 'draw' || mode === 'route');
+    if (mode === 'draw' || mode === 'route') this._updateDrawHint();
     this._updateActionButtons();
     this._updateWorkflowStatus();
     this._redraw();
@@ -1813,6 +1896,7 @@ input[type=file] { display: none; }
   _updateActionButtons() {
     const draw        = this._mode === 'draw';
     const splitMode   = this._mode === 'split';
+    const routeMode   = this._mode === 'route';
     const polyDraw    = draw && this._drawShape === 'polygon';
     const mergePending = this._mergeIds.length === 2;
     const splitLinePts = this._splitLinePts.length;
@@ -1820,7 +1904,8 @@ input[type=file] { display: none; }
     const drawBlocked = this._drawType === 'region_obstacle' || this._selType === 'region_obstacle';
     const workEditPending = this._editScope === 'work';
     const undoEnabled = polyDraw || this._mode === 'delete'
-      || (splitMode && (this._splitLinePts.length > 0 || this._splitPending));
+      || (splitMode && (this._splitLinePts.length > 0 || this._splitPending))
+      || (routeMode && this._routePts.length > 0);
 
     const undoBtn   = this.shadowRoot.getElementById('btn-undo');
     const doneBtn   = this.shadowRoot.getElementById('btn-finish');
@@ -1829,18 +1914,20 @@ input[type=file] { display: none; }
     const deleteBtn = this.shadowRoot.getElementById('mode-delete');
     const mergeBtn  = this.shadowRoot.getElementById('mode-merge');
     const splitBtn  = this.shadowRoot.getElementById('mode-split');
+    const routeBtn  = this.shadowRoot.getElementById('mode-route');
     const drawType  = this.shadowRoot.getElementById('draw-type');
     const shapeBtns = ['polygon', 'circle', 'ellipse']
       .map(shape => this.shadowRoot.getElementById(`shape-${shape}`))
       .filter(Boolean);
 
     if (undoBtn)   undoBtn.disabled   = !undoEnabled;
-    if (doneBtn)   doneBtn.disabled   = !polyDraw || drawBlocked;
-    if (cancelBtn) cancelBtn.disabled = (!(draw || splitMode)) || (drawBlocked && !splitMode);
+    if (doneBtn)   doneBtn.disabled   = routeMode ? this._routePts.length === 0 : (!polyDraw || drawBlocked);
+    if (cancelBtn) cancelBtn.disabled = routeMode ? this._routePts.length === 0 : ((!(draw || splitMode)) || (drawBlocked && !splitMode));
     if (drawBtn)   drawBtn.disabled   = anyPending || drawBlocked;
     if (deleteBtn) deleteBtn.disabled = anyPending;
     if (mergeBtn)  mergeBtn.disabled  = this._hasLocalEdits || this._splitPending;
     if (splitBtn)  splitBtn.disabled  = this._hasLocalEdits || mergePending;
+    if (routeBtn)  routeBtn.disabled  = !this._newWorkRegion();
     if (drawType)  drawType.disabled  = anyPending || this._selType === 'region_obstacle' || workEditPending;
     shapeBtns.forEach(btn => {
       btn.disabled = drawBlocked;
@@ -1852,6 +1939,15 @@ input[type=file] { display: none; }
     if (!this._workflowStatus) return;
 
     this._workflowStatus.classList.remove('clean', 'edited', 'merge');
+
+    const newWork = this._newWorkRegion();
+    if (newWork) {
+      this._workflowStatus.classList.add(this._routePts.length > 0 ? 'merge' : 'edited');
+      this._workflowStatus.textContent = this._routePts.length > 0
+        ? `State: New zone ${newWork.id} + route (${this._routePts.length} pts — submit to send)`
+        : `State: New zone ${newWork.id} — route required before submit`;
+      return;
+    }
 
     if (this._splitPending) {
       this._workflowStatus.classList.add('merge');
@@ -1915,12 +2011,37 @@ input[type=file] { display: none; }
 
   _updateDrawHint() {
     if (!this._hint) return;
+    if (this._mode === 'route') {
+      this._hint.textContent = 'Click to place route points from the charger towards the new work zone\u00a0\u00b7\u00a0Enter to finish\u00a0\u00b7\u00a0Z to undo\u00a0\u00b7\u00a0Esc to clear';
+      return;
+    }
     const hints = {
       polygon: 'Click to add points\u00a0\u00b7\u00a0Click first point or Enter to finish\u00a0\u00b7\u00a0Right-click / Esc to cancel\u00a0\u00b7\u00a0Z to undo',
       circle:  'Click and drag from center outward to set radius\u00a0\u00b7\u00a0Release to place\u00a0\u00b7\u00a0Esc to cancel',
       ellipse: 'Click and drag to define bounding box\u00a0\u00b7\u00a0Release to place\u00a0\u00b7\u00a0Esc to cancel',
     };
     this._hint.textContent = hints[this._drawShape] || hints.polygon;
+  }
+
+  // ── Access route for the new work zone ────────────────────────────────────────
+  _newWorkRegion() {
+    return (this._regions.region_work || []).find(r => r._isNew) || null;
+  }
+
+  _finishRoute() {
+    const target = this._newWorkRegion();
+    if (!target) { this._status('⚠️ No new work zone to route to'); return; }
+    if (this._routePts.length < 1) { this._status('⚠️ Place at least one route point'); return; }
+    this._setMode('select');
+    this._status(`🧭 Route ready: ${this._routePts.length} point(s) to zone ${target.id}. Submit map to send.`);
+  }
+
+  _undoRoutePoint() {
+    if (this._routePts.length === 0) { this._status('⚠️ No route points to undo'); return; }
+    this._routePts.pop();
+    this._updateActionButtons();
+    this._updateWorkflowStatus();
+    this._redraw();
   }
 
   _undoPoint() {
@@ -1964,6 +2085,7 @@ input[type=file] { display: none; }
       this._redraw();
       return;
     }
+    if (!this._canAddWorkRegion()) return;
     const pts = [...this._drawPts];
     // Close polygon
     if (pts[0][0] !== pts[pts.length - 1][0] || pts[0][1] !== pts[pts.length - 1][1]) {
@@ -1979,9 +2101,19 @@ input[type=file] { display: none; }
     this._renderProps();
     this._redraw();
     this._status(`✅ Added ${REGION_CONFIG[this._drawType].label} (${pts.length} pts)`);
+    this._afterRegionAdded();
   }
 
   _cancelDraw() {
+    if (this._mode === 'route') {
+      if (this._routePts.length > 0) {
+        this._routePts = [];
+        this._updateActionButtons();
+        this._redraw();
+        this._status('Route cleared');
+      }
+      return;
+    }
     if (this._mode === 'split') {
       if (this._splitLinePts.length > 0 || this._splitRegionId) {
         this._splitRegionId = null;
@@ -2039,6 +2171,7 @@ input[type=file] { display: none; }
       this._status('⚠️ This region type is delete-only');
       return;
     }
+    if (!this._canAddWorkRegion()) return;
     const r = this._makeRegion(this._drawType, pts);
     if (!this._markEdited(this._drawType)) return;
     this._regions[this._drawType].push(r);
@@ -2048,6 +2181,24 @@ input[type=file] { display: none; }
     this._renderProps();
     this._redraw();
     this._status(`✅ Added ${shapeLabel} as ${REGION_CONFIG[this._drawType].label} (${pts.length - 1} pts)`);
+    this._afterRegionAdded();
+  }
+
+  _canAddWorkRegion() {
+    if (this._drawType !== 'region_work') return true;
+    if (!this._newWorkRegion()) return true;
+    this._status('⚠️ Only one new work zone can be added per submit. Submit or reset first.');
+    this._drawPts = [];
+    this._drawAnchor = null;
+    this._redraw();
+    return false;
+  }
+
+  // A new work zone is unreachable for the mower until a drive route is supplied.
+  _afterRegionAdded() {
+    if (this._drawType !== 'region_work') return;
+    this._setMode('route');
+    this._status('🧭 New work zone added — now click the route the mower drives from the charger to this zone.');
   }
 
   _makeRegion(type, points) {
@@ -2062,6 +2213,7 @@ input[type=file] { display: none; }
       points: stringifyPoints(normalizedPoints),
       points_num: normalizedPoints.length,
       _parsedPoints: normalizedPoints,
+      _isNew: true,
     };
     switch (type) {
       case 'region_work': {
@@ -2123,6 +2275,10 @@ input[type=file] { display: none; }
     if (!this._markEdited(type)) return;
     const [removed] = list.splice(idx, 1);
     if (this._selId === id && this._selType === type) { this._selType = null; this._selId = null; }
+    if (removed._isNew && type === 'region_work') {
+      this._routePts = [];
+      if (this._mode === 'route') this._setMode('select');
+    }
     this._deletedStack.push({ type, region: removed, idx });
     if (this._deletedStack.length > 20) this._deletedStack.shift();
     this._renderSidebar();
@@ -2328,6 +2484,7 @@ input[type=file] { display: none; }
       out[t] = (this._regions[t] || []).map(r => {
         const copy = { ...r };
         delete copy._parsedPoints;
+        delete copy._isNew;
         const normalizedPoints = ensureClosedPoints(r._parsedPoints);
         copy.points     = stringifyPoints(normalizedPoints);
         copy.points_num = normalizedPoints.length;
@@ -2338,9 +2495,24 @@ input[type=file] { display: none; }
     out.region_charger_channel = (this._regions.region_charger_channel || []).map(r => {
       const copy = { ...r };
       delete copy._parsedPoints;
+      delete copy._isNew;
       return copy;
     });
     out.update_time = now;
+    // Only one new work zone per submit, so the route is a single top-level node.
+    const newWork = this._newWorkRegion();
+    if (newWork && this._routePts.length > 0) {
+      out.new_region_route = {
+        region_id: newWork.id,
+        points: this._routePts.map(([x, y]) => [
+          Math.round(x * 1000) / 1000,
+          Math.round(y * 1000) / 1000,
+        ]),
+        points_num: this._routePts.length,
+      };
+    } else {
+      delete out.new_region_route;
+    }
     if (this._mergeIds.length === 2) {
       out.merge_region_ids = [...this._mergeIds];
       out.merge_regionsid = [...this._mergeIds];
@@ -2380,6 +2552,12 @@ input[type=file] { display: none; }
       this._finishDraw();
     }
 
+    if (this._newWorkRegion() && this._routePts.length === 0) {
+      this._setMode('route');
+      this._status('⚠️ The new work zone needs a route — click the path the mower drives to reach it.');
+      return;
+    }
+
     const out = this._buildMapPayload();
     if (!out) { this._status('⚠️ No map loaded'); return; }
 
@@ -2391,9 +2569,13 @@ input[type=file] { display: none; }
       `Safe: ${(out.region_placed_blank || []).length}`,
     ].join('  |  ');
 
+    const routeNote = out.new_region_route
+      ? `\nNew zone ${out.new_region_route.region_id} with ${out.new_region_route.points_num}-point access route`
+      : '';
+
     const ok = await this._confirmAction(
       'Submit map',
-      `Submit current map?\n${summary}`
+      `Submit current map?\n${summary}${routeNote}`
     );
     if (!ok) {
       this._status('Submit cancelled');
@@ -2445,6 +2627,8 @@ input[type=file] { display: none; }
       this._splitRegionId = null;
       this._splitLinePts  = [];
       this._splitPending  = false;
+      this._routePts      = [];
+      for (const r of this._regions.region_work || []) delete r._isNew;
       this._updateActionButtons();
       this._renderSidebar();
       this._status(`☁ Submitted map to ${SERVICE_DOMAIN}.${SERVICE_SET_MAP} (${this._config.entity})`);
@@ -2496,6 +2680,7 @@ input[type=file] { display: none; }
     this._splitRegionId = null;
     this._splitLinePts  = [];
     this._splitPending  = false;
+    this._routePts      = [];
 
     // Reset post-submit markers to allow immediate reload
     this._ignoreEntityMapUntil = 0;
