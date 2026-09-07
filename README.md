@@ -34,6 +34,7 @@ This card lets you:
   - `sunseeker.restore_map`
   - `sunseeker.delete_backup`
   - `sunseeker.cancel_add_work_area`
+  - `sunseeker.refresh_map`
 - For adding work zones: a mower on MODEL_X / MODEL_S and Bluetooth reachable from Home Assistant
 
 ## Installation (via HACS)
@@ -132,6 +133,21 @@ Bluetooth. The card prepares everything, the integration then runs the BLE sessi
 - The mower must be **docked** when you submit
 - Bluetooth connection between Home Assistant and the mower for the **whole** session
 
+### Merge vs. new zone
+
+What happens to a drawn outline depends entirely on where you draw it, not on anything
+you pick in the card:
+
+- **Drawn touching or overlapping an existing work zone** → it's merged into that zone.
+- **Drawn away from any existing zone** → it becomes its own new, separate zone.
+
+> **A brand-new (non-merged) zone has no passage back to the charger.**
+> The route you draw in step 2 only gets the mower *to* the new zone — it does not
+> become a permanent passage. Once the zone is recorded, you must draw a **Passage**
+> (↔️ in the Draw type dropdown) connecting the new zone to an existing one (or to the
+> charger's route), otherwise the mower may not be able to find its way home after
+> mowing that zone.
+
 ### Steps
 
 1. Press **Draw**, choose **🌱 Work Zone** in the type dropdown and draw the outline
@@ -179,6 +195,10 @@ The backup panel displays up to 5 backups from `map_backup.data`.
 
 - Shows latest first (by `mapId`)
 - Marks active map with **Current** badge
+- **Refresh** calls `sunseeker.refresh_map` to force the integration to re-fetch
+  both the map and the backup list from the server. Use this if a backup, restore,
+  or new work zone doesn't show up right away — the mower can take a few seconds
+  to upload the updated map to the server after the request.
 - **Backup Current** creates a backup for the current `map_id`
 - **Restore** restores selected backup
 - **Delete** removes selected backup
