@@ -7,6 +7,7 @@ This card lets you:
 - draw regions as polygon, circle, or ellipse
 - move vertices and entire regions
 - delete and undo deletions
+- add a brand new work zone and follow the Bluetooth recording live
 - backup, restore, and delete map backups from the same UI
 - submit the updated map to your Sunseeker integration service
 
@@ -15,6 +16,8 @@ This card lets you:
 - Home Assistant-style toolbar and dialog UX
 - Aspect-ratio-safe map rendering
 - Built-in region list + quick rename for work zones
+- Live progress panel with cancel button while a new work zone is recorded
+- Live mower position and heading drawn on the map
 - Backup panel with thumbnails, current map badge, and restore/delete actions
 - Optional debug mode for JSON import/export
 
@@ -30,6 +33,8 @@ This card lets you:
   - `sunseeker.backup_map`
   - `sunseeker.restore_map`
   - `sunseeker.delete_backup`
+  - `sunseeker.cancel_add_work_area`
+- For adding work zones: a mower on MODEL_X / MODEL_S and Bluetooth reachable from Home Assistant
 
 ## Installation (via HACS)
 
@@ -83,6 +88,8 @@ backup_panel_position: bottom
 | `attribute` | string | auto-detect | Attribute containing map JSON |
 | `debug` | boolean | `false` | Shows Import + Save JSON buttons |
 | `backup_panel_position` | string | `bottom` | Backup panel position: `bottom`, `left`, or `right` |
+| `ble_status_entity` | string | auto-detect | `sensor.*_ble_status` entity used for the add-zone progress panel and the live mower position |
+| `mower_image` | string | auto-detect | URL of an image drawn at the live mower position. Auto-detected from the integration's "Mower image" entity when left empty; falls back to a simple drawn shape if none is found. |
 
 ## Drawing Modes
 
@@ -97,7 +104,11 @@ New shapes are stored as region polygons in the outgoing map payload.
 ## Toolbar Actions
 
 - **Select**: select, move, and edit regions
+- **Merge**: select two adjacent work zones to merge them
+- **Split**: draw a line across one work zone to split it
 - **Delete**: click region to remove it
+- **Draw**: draw a new region of the selected type
+- **Route**: draw the drive route from the charger to a new work zone
 - **Undo**:
   - draw mode: undo last polygon point
   - delete mode: restore last deleted region
@@ -105,6 +116,62 @@ New shapes are stored as region polygons in the outgoing map payload.
 - **Fit**: fit map bounds to view
 - **Reset**: discard in-card edits and reload from entity
 - **Submit Map**: call `sunseeker.set_map`
+
+## Adding a Work Zone
+
+A new work zone cannot be created from map data alone. The mower has to physically
+drive the outline of the new zone while Home Assistant is connected to it over
+Bluetooth. The card prepares everything, the integration then runs the BLE session.
+
+### What is required
+
+- The map must be **clean** — submit or reset any other pending edits first
+- Only **one** new work zone per submit
+- The new zone needs a **route**: the path the mower drives from the charger to the
+  first point of the new zone
+- The mower must be **docked** when you submit
+- Bluetooth connection between Home Assistant and the mower for the **whole** session
+
+### Steps
+
+1. Press **Draw**, choose **🌱 Work Zone** in the type dropdown and draw the outline
+   of the new zone. Finish with **Done** or Enter.
+2. The card automatically switches to **Route** mode. Click the route points the
+   mower drives from the charger to the new zone, then press **Done**.
+3. Press **Submit Map** and confirm.
+4. The progress panel appears and follows the mower through the phases
+   (Connect → Pre-flight → Remote control → Navigation → Recording → New zone id → Commit).
+   The mower is drawn on the map with its live position and heading.
+5. When the session finishes, the map is reloaded from the entity and the new zone
+   appears in the region list, where you can rename it.
+
+Press **✗ Cancel** in the progress panel at any time to abort. The mower stops and
+drives back to the charger.
+
+### Important notes
+
+> **Route points are only accurate to about 50 cm.**
+> Place them with enough clearance so the mower cannot bump into anything. During
+> navigation the mower is effectively blind — it will **not** stop for a wall, a
+> tree, a flower bed or a step. Keep well away from obstacles, and prefer a few
+> extra route points over long straight legs through narrow passages.
+
+> **The Bluetooth connection must hold for the entire session.**
+> The mower drives away from the dock, so the connection has to survive across the
+> whole route and the complete outline of the new zone. If the link drops, the
+> session aborts.
+
+### No Bluetooth coverage across the whole garden?
+
+If Home Assistant (or an ESPHome BLE proxy) cannot reach the mower everywhere it
+will drive, use a BLE proxy that travels with the mower:
+
+[Zen3515/homeassistant-mobile-ble-proxy](https://github.com/Zen3515/homeassistant-mobile-ble-proxy)
+
+It turns an Android phone into a Home Assistant Bluetooth proxy. Install it on a
+spare phone and tape the phone on top of the mower — the proxy then stays within
+centimetres of the mower for the whole session, and Home Assistant talks to the
+mower over Wi-Fi through the phone.
 
 ## Backup Panel
 
@@ -158,6 +225,15 @@ debug: false
 - Confirm Sunseeker integration services are registered
 - Verify card `entity` belongs to the same mower/device context expected by the integration
 - Check Home Assistant logs for service-call exceptions
+
+### Adding a work zone fails or shows no progress
+
+- **Submit is refused**: the map must be clean and the new zone must have a route
+- **No progress panel**: set `ble_status_entity` manually if the `sensor.*_ble_status`
+  entity could not be auto-detected
+- **Session aborts mid-way**: usually lost Bluetooth coverage — see the mobile BLE
+  proxy suggestion above
+- **Mower does not leave the dock**: it must be docked and idle when you submit
 
 ## Development Notes
 

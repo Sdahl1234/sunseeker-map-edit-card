@@ -65,6 +65,19 @@ const SERVICE_SET_MAP = 'set_map';
 const SERVICE_RESTORE_MAP = 'restore_map';
 const SERVICE_BACKUP_MAP = 'backup_map';
 const SERVICE_DELETE_BACKUP = 'delete_backup';
+const SERVICE_CANCEL_ADD_WORK_AREA = 'cancel_add_work_area';
+
+// Phases reported by the backend BLE session while it records a new work zone.
+const BLE_PHASES = [
+  'Connect',
+  'Pre-flight',
+  'Remote control',
+  'Navigation',
+  'Recording',
+  'New zone id',
+  'Commit',
+];
+const BLE_STATUS_SUFFIX = '_ble_status';
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function parsePoints(str) {
@@ -161,6 +174,15 @@ class SunseekerMapEditCard extends HTMLElement {
     // Access route for the new work zone (mower drives these before recording the boundary)
     this._routePts = [];
 
+    // BLE add-zone progress (driven by the backend "Ble status" sensor)
+    this._bleVisible = false;
+    this._bleLastStatus = null;
+    this._bleWaypointTotal = 0;
+    this._bleHideTimer = null;
+    this._mowerPoseSig = '';
+    this._mowerImg = null;
+    this._mowerImgUrl = null;
+
     this._buildUI();
   }
 
@@ -183,6 +205,8 @@ class SunseekerMapEditCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._tryLoadFromEntity();
+    this._updateBleProgress();
+    this._syncMowerPose();
   }
 
   _tryLoadFromEntity() {
@@ -241,6 +265,266 @@ class SunseekerMapEditCard extends HTMLElement {
     }
   }
 
+  // ── BLE add-zone progress ─────────────────────────────────────────────────────
+  // The backend records a new work zone over BLE and reports "Phase N - ..." strings.
+  _bleStatusEntity() {
+    if (this._config?.ble_status_entity) return this._config.ble_status_entity;
+    if (!this._hass) return null;
+    const candidates = Object.keys(this._hass.states)
+      .filter(eid => eid.startsWith('sensor.') && eid.endsWith(BLE_STATUS_SUFFIX));
+    if (!candidates.length) return null;
+    // Prefer the sensor belonging to the same device as the configured map entity.
+    const slug = (this._config?.entity || '').split('.')[1] || '';
+    const base = slug.replace(/_(map|map_data|map_image|image)$/, '');
+    return (base && candidates.find(eid => eid === `sensor.${base}${BLE_STATUS_SUFFIX}`))
+      || (base && candidates.find(eid => eid.startsWith(`sensor.${base}`)))
+      || candidates[0];
+  }
+
+  // Auto-detect the integration's own "Mower image" entity so the live
+  // overlay uses the real robot photo without needing manual config.
+  // Entity names are translated (e.g. Danish "Klipperbillede"), so name-based
+  // matching doesn't work — match on translation_key/unique_id instead, which
+  // stay in English regardless of the active language.
+  _mowerImageEntity() {
+    if (!this._hass) return null;
+    const entities = this._hass.entities || {};
+    const imageIds = Object.keys(this._hass.states).filter(eid => eid.startsWith('image.'));
+
+    const byTranslationKey = imageIds.filter(eid => entities[eid]?.translation_key === 'mower_robot_image');
+    const byUniqueId = imageIds.filter(eid => (entities[eid]?.unique_id || '').startsWith('Mower image_'));
+    const byName = imageIds.filter(eid => /robot[_-]?image|mower[_-]?image/i.test(eid));
+    const candidates = byTranslationKey.length ? byTranslationKey : (byUniqueId.length ? byUniqueId : byName);
+    if (!candidates.length) return null;
+
+    // Prefer the one on the same device as the configured map entity.
+    const mapEntity = this._config?.entity || '';
+    const deviceId = entities[mapEntity]?.device_id;
+    if (deviceId) {
+      const sameDevice = candidates.find(eid => entities[eid]?.device_id === deviceId);
+      if (sameDevice) return sameDevice;
+    }
+    const slug = mapEntity.split('.')[1] || '';
+    const base = slug.replace(/_(map|map_data|map_image|image)$/, '');
+    return (base && candidates.find(eid => eid.startsWith(`image.${base}`))) || candidates[0];
+  }
+
+  _mowerImageUrl() {
+    if (this._config?.mower_image) return this._config.mower_image;
+    const entityId = this._mowerImageEntity();
+    if (!entityId) return null;
+    return this._hass?.states?.[entityId]?.attributes?.entity_picture || null;
+  }
+
+  _parseBleStatus(text) {
+    const phaseMatch = /^\s*Phase\s*(\d+)/i.exec(text);
+    const phase = phaseMatch ? Math.min(Number(phaseMatch[1]), BLE_PHASES.length) : 0;
+    const detail = text.replace(/^\s*Phase\s*\d+\s*[:–-]?\s*/i, '').trim();
+
+    const wpTotal = /navigation\s+(\d+)\s+waypoint/i.exec(text);
+    if (wpTotal) this._bleWaypointTotal = Number(wpTotal[1]);
+
+    let fraction = 0;
+    const point = /point\s+(\d+)/i.exec(detail);
+    if (phase === 4 && point && this._bleWaypointTotal > 0) {
+      fraction = Math.min(Number(point[1]) / this._bleWaypointTotal, 1);
+    }
+
+    const error = /error|fail|abort|not received|did not arrive/i.test(text);
+    const cancelled = /cancelled/i.test(text);
+    const done = /disconnect/i.test(text) || cancelled;
+    const percent = done
+      ? 100
+      : Math.round(((Math.max(phase, 1) - 1 + fraction) / BLE_PHASES.length) * 100);
+
+    return { phase, detail, error: error || cancelled, done, percent };
+  }
+
+  _updateBleProgress() {
+    if (!this._blePanel) return;
+    const entityId = this._bleStatusEntity();
+    const stateObj = entityId ? this._hass?.states?.[entityId] : null;
+    const raw = stateObj?.state ?? null;
+    const text = typeof raw === 'string' ? raw.trim() : '';
+
+    // Restore the waypoint total from the sensor attribute (survives a card
+    // reload, unlike the "navigation N waypoint" text seen only once).
+    const waypointTotal = Number(stateObj?.attributes?.waypoint_total);
+    if (Number.isFinite(waypointTotal) && waypointTotal > 0) {
+      this._bleWaypointTotal = waypointTotal;
+    }
+
+    if (!text || text === 'unknown' || text === 'unavailable') {
+      this._bleLastStatus = '';
+      return;
+    }
+    if (text === this._bleLastStatus) return;
+    this._bleLastStatus = text;
+
+    const { phase, detail, error, done, percent } = this._parseBleStatus(text);
+    this._showBleProgress();
+
+    this._blePanel.classList.toggle('error', error);
+    this._blePanel.classList.toggle('done', done && !error);
+    this._blePhase.textContent = phase
+      ? `Phase ${phase} of ${BLE_PHASES.length} — ${percent}%`
+      : `${percent}%`;
+    this._bleFill.style.width = `${percent}%`;
+    this._bleDetail.textContent = detail || text;
+
+    for (const step of this._bleSteps.querySelectorAll('.ble-step')) {
+      const n = Number(step.dataset.phase);
+      step.classList.toggle('active', n === phase && !done);
+      step.classList.toggle('past', n < phase || done);
+    }
+
+    if (done) {
+      if (!error) {
+        // Reload the map once the mower has committed the new zone.
+        this._lastEntityKey = null;
+        this._submittedMapSignature = null;
+        this._ignoreEntityMapUntil = 0;
+        this._tryLoadFromEntity();
+      }
+      if (this._bleHideTimer) clearTimeout(this._bleHideTimer);
+      this._bleHideTimer = setTimeout(() => this._hideBleProgress(), 30000);
+    }
+    this._bleCancelBtn.disabled = done;
+  }
+
+  _showBleProgress() {
+    if (this._bleHideTimer) {
+      clearTimeout(this._bleHideTimer);
+      this._bleHideTimer = null;
+    }
+    this._bleVisible = true;
+    this._blePanel.hidden = false;
+    if (this._bleCancelBtn) this._bleCancelBtn.disabled = false;
+  }
+
+  _hideBleProgress() {
+    if (this._bleHideTimer) {
+      clearTimeout(this._bleHideTimer);
+      this._bleHideTimer = null;
+    }
+    this._bleVisible = false;
+    if (this._blePanel) this._blePanel.hidden = true;
+  }
+
+  async _cancelAddWorkZone() {
+    if (!this._hass || !this._config?.entity) {
+      this._status('⚠️ No entity configured');
+      return;
+    }
+    const ok = await this._confirmAction(
+      'Cancel recording',
+      'Abort the running work zone recording?\nThe mower stops and drives back to the charger.'
+    );
+    if (!ok) return;
+
+    this._bleCancelBtn.disabled = true;
+    try {
+      await this._hass.callService(SERVICE_DOMAIN, SERVICE_CANCEL_ADD_WORK_AREA, {
+        entity_id: this._config.entity,
+      });
+      this._bleDetail.textContent = 'Cancel requested — waiting for the mower to stop.';
+      this._status('✗ Cancel requested');
+    } catch (err) {
+      this._bleCancelBtn.disabled = false;
+      this._status(`❌ Cancel failed: ${err?.message || err}`);
+    }
+  }
+
+  // ── Live mower overlay ────────────────────────────────────────────────────────
+  _mowerPose() {
+    const entityId = this._bleStatusEntity();
+    const attrs = entityId ? this._hass?.states?.[entityId]?.attributes : null;
+    if (!attrs) return null;
+    const x = Number(attrs.mower_x);
+    const y = Number(attrs.mower_y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const angle = Number(attrs.mower_angle);
+    return { x, y, angle: Number.isFinite(angle) ? angle : 0 };
+  }
+
+  _syncMowerPose() {
+    const pose = this._mowerPose();
+    const sig = pose ? `${pose.x},${pose.y},${pose.angle}` : '';
+    if (sig === this._mowerPoseSig) return;
+    this._mowerPoseSig = sig;
+    this._redraw();
+  }
+
+  _mowerImage() {
+    const url = this._mowerImageUrl();
+    if (!url) return null;
+    if (url !== this._mowerImgUrl) {
+      this._mowerImgUrl = url;
+      this._mowerImg = new Image();
+      this._mowerImg.onload = () => this._redraw();
+      this._mowerImg.src = url;
+    }
+    return this._mowerImg?.complete && this._mowerImg.naturalWidth ? this._mowerImg : null;
+  }
+
+  _drawMower(ctx) {
+    const pose = this._mowerPose();
+    if (!pose) return;
+
+    const [px, py] = this._m2c(pose.x, pose.y);
+    const size = 30;
+
+    ctx.save();
+    ctx.translate(px, py);
+
+    ctx.fillStyle = 'rgba(0,229,255,0.15)';
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.85, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Map heading 0 points along +Y, which is up on the canvas.
+    ctx.rotate(-pose.angle);
+
+    const img = this._mowerImage();
+    if (img) {
+      ctx.drawImage(img, -size / 2, -size / 2, size, size);
+    } else {
+      const w = size * 0.62;
+      const h = size * 0.82;
+      ctx.fillStyle = '#2e7d32';
+      ctx.strokeStyle = '#c8e6c9';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(-w / 2, -h / 2, w, h, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#111';
+      ctx.fillRect(-w / 2 - 2, -h / 4, 3, h / 3);
+      ctx.fillRect(w / 2 - 1, -h / 4, 3, h / 3);
+
+      ctx.fillStyle = '#FFEB3B';
+      ctx.beginPath();
+      ctx.moveTo(0, -h / 2 - 6);
+      ctx.lineTo(-5, -h / 2 + 1);
+      ctx.lineTo(5, -h / 2 + 1);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.font = '10px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.textAlign = 'center';
+    ctx.fillText(
+      `${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}  ${Math.round((pose.angle * 180) / Math.PI)}°`,
+      px,
+      py + size,
+    );
+    ctx.restore();
+  }
+
   connectedCallback() {
     this._kbHandler = e => this._onKeyDown(e);
     document.addEventListener('keydown', this._kbHandler);
@@ -251,6 +535,10 @@ class SunseekerMapEditCard extends HTMLElement {
     if (this._postSubmitRefreshTimer) {
       clearTimeout(this._postSubmitRefreshTimer);
       this._postSubmitRefreshTimer = null;
+    }
+    if (this._bleHideTimer) {
+      clearTimeout(this._bleHideTimer);
+      this._bleHideTimer = null;
     }
   }
 
@@ -675,6 +963,61 @@ canvas { display: block; width: 100%; height: 100%; }
 
 input[type=file] { display: none; }
 
+/* ── BLE add-zone progress ── */
+.ble-progress {
+  padding: 8px 12px 10px;
+  background: rgba(3,169,244,0.08);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.ble-progress[hidden] { display: none; }
+.ble-progress.error { background: rgba(220,60,60,0.12); }
+.ble-progress.done  { background: rgba(34,140,34,0.12); }
+.ble-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.ble-title { font-weight: 700; }
+.ble-phase { color: var(--secondary-text-color, #9a9a9a); margin-left: auto; }
+.ble-close {
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ble-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.12);
+  overflow: hidden;
+}
+.ble-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--primary-color, #03A9F4);
+  transition: width .35s ease;
+}
+.ble-progress.error .ble-fill { background: #e05252; }
+.ble-progress.done  .ble-fill { background: #4caf50; }
+.ble-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--secondary-text-color, #9a9a9a);
+  min-height: 15px;
+}
+.ble-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.ble-step {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--secondary-text-color, #9a9a9a);
+}
+.ble-step.active { border-color: var(--primary-color, #03A9F4); color: var(--primary-color, #03A9F4); font-weight: 700; }
+.ble-step.past   { border-color: rgba(80,220,80,0.5); color: #7fd07f; }
+
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 3px; }
@@ -715,6 +1058,19 @@ input[type=file] { display: none; }
     <button class="btn" id="reload-btn" title="Clear all edits and reload from entity attribute — Shift+R">🔄 Reset</button>
     <button class="btn submit" id="submit-btn" title="Call sunseeker.set_map with current map data">☁ Submit Map</button>
     <span class="workflow-status clean" id="workflow-status" title="Edit and merge workflow state">State: Clean</span>
+  </div>
+
+  <!-- BLE add-zone progress -->
+  <div class="ble-progress" id="ble-progress" hidden>
+    <div class="ble-hd">
+      <span class="ble-title">🧭 Adding work zone</span>
+      <span class="ble-phase" id="ble-phase"></span>
+      <button class="btn del" id="ble-cancel" title="Abort the recording and send the mower home">✗ Cancel</button>
+      <button class="btn ble-close" id="ble-close" title="Hide progress">✕</button>
+    </div>
+    <div class="ble-bar"><div class="ble-fill" id="ble-fill"></div></div>
+    <div class="ble-detail" id="ble-detail"></div>
+    <div class="ble-steps" id="ble-steps"></div>
   </div>
 
   <!-- Work area -->
@@ -776,6 +1132,17 @@ input[type=file] { display: none; }
     this._confirmOk = this.shadowRoot.getElementById('confirm-ok');
     this._confirmCancel = this.shadowRoot.getElementById('confirm-cancel');
     this._workflowStatus = this.shadowRoot.getElementById('workflow-status');
+    this._blePanel  = this.shadowRoot.getElementById('ble-progress');
+    this._blePhase  = this.shadowRoot.getElementById('ble-phase');
+    this._bleFill   = this.shadowRoot.getElementById('ble-fill');
+    this._bleDetail = this.shadowRoot.getElementById('ble-detail');
+    this._bleSteps  = this.shadowRoot.getElementById('ble-steps');
+    this._bleSteps.innerHTML = BLE_PHASES
+      .map((label, i) => `<span class="ble-step" data-phase="${i + 1}">${i + 1}. ${escHtml(label)}</span>`)
+      .join('');
+    this.shadowRoot.getElementById('ble-close').onclick = () => this._hideBleProgress();
+    this._bleCancelBtn = this.shadowRoot.getElementById('ble-cancel');
+    this._bleCancelBtn.onclick = () => this._cancelAddWorkZone();
 
     this._applyConfigUi();
 
@@ -1112,6 +1479,9 @@ input[type=file] { display: none; }
 
     // Access route overlay for the pending new work zone
     this._drawRoute(ctx);
+
+    // Live mower position while a BLE session is running
+    this._drawMower(ctx);
 
     // Vertex handles on selected region
     if (this._selId && MODIFIABLE.includes(this._selType)) {
@@ -2616,6 +2986,20 @@ input[type=file] { display: none; }
       this._tryLoadFromEntity();
     }, 6500);
 
+    const addingZone = !!out.new_region_route;
+    if (addingZone) {
+      this._bleLastStatus = '';
+      this._bleWaypointTotal = out.new_region_route.points_num || 0;
+      this._blePanel.classList.remove('error', 'done');
+      this._blePhase.textContent = 'Waiting for mower…';
+      this._bleFill.style.width = '0%';
+      this._bleDetail.textContent = `Zone ${out.new_region_route.region_id} queued — connecting over Bluetooth.`;
+      for (const step of this._bleSteps.querySelectorAll('.ble-step')) {
+        step.classList.remove('active', 'past');
+      }
+      this._showBleProgress();
+    }
+
     try {
       await this._hass.callService(SERVICE_DOMAIN, SERVICE_SET_MAP, {
         entity_id: this._config.entity,
@@ -2634,6 +3018,7 @@ input[type=file] { display: none; }
       this._status(`☁ Submitted map to ${SERVICE_DOMAIN}.${SERVICE_SET_MAP} (${this._config.entity})`);
       this._updateWorkflowStatus();
     } catch (err) {
+      if (addingZone) this._hideBleProgress();
       this._status(`❌ Submit failed: ${err?.message || err}`);
     }
   }
@@ -3210,6 +3595,18 @@ class SunseekerMapEditCardEditor extends HTMLElement {
   </div>
 
   <div class="field">
+    <label>Ble Status Entity (optional)</label>
+    <input class="ent-custom" id="ble-entity-input" type="text" value="${escHtml(this._config.ble_status_entity || '')}" placeholder="sensor.my_mower_ble_status">
+    <div class="hint">Used to show progress while a new work zone is recorded. Auto-detected when left empty.</div>
+  </div>
+
+  <div class="field">
+    <label>Mower Image (optional)</label>
+    <input class="ent-custom" id="mower-image-input" type="text" value="${escHtml(this._config.mower_image || '')}" placeholder="/local/sunseeker-map-edit-card/robot.png">
+    <div class="hint">Image drawn at the live mower position. Auto-detected from the integration's "Mower image" entity when left empty; falls back to a simple drawn shape if none is found.</div>
+  </div>
+
+  <div class="field">
     <label>Backup Panel Position</label>
     <select class="attr-sel" id="backup-layout-sel">
       <option value="bottom"${backupPanelPosition === 'bottom' ? ' selected' : ''}>Below editor</option>
@@ -3218,7 +3615,7 @@ class SunseekerMapEditCardEditor extends HTMLElement {
     </select>
     <div class="hint">Use side layout for tall/vertical maps.</div>
   </div>
-  Version 1.0.6
+  Version 1.0.7
 </div>`;
 
     const es = this.shadowRoot.getElementById('entity-sel');
@@ -3254,6 +3651,26 @@ class SunseekerMapEditCardEditor extends HTMLElement {
         const checked = !!e.target.checked;
         const cfg = { ...this._config, debug: checked };
         if (!checked) delete cfg.debug;
+        this._fire(cfg);
+      });
+    }
+
+    const bleInput = this.shadowRoot.getElementById('ble-entity-input');
+    if (bleInput) {
+      bleInput.addEventListener('change', e => {
+        const val = e.target.value.trim();
+        const cfg = { ...this._config, ble_status_entity: val };
+        if (!val) delete cfg.ble_status_entity;
+        this._fire(cfg);
+      });
+    }
+
+    const mowerImageInput = this.shadowRoot.getElementById('mower-image-input');
+    if (mowerImageInput) {
+      mowerImageInput.addEventListener('change', e => {
+        const val = e.target.value.trim();
+        const cfg = { ...this._config, mower_image: val };
+        if (!val) delete cfg.mower_image;
         this._fire(cfg);
       });
     }
