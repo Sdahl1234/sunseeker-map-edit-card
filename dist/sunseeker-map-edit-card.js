@@ -66,6 +66,7 @@ const SERVICE_RESTORE_MAP = 'restore_map';
 const SERVICE_BACKUP_MAP = 'backup_map';
 const SERVICE_DELETE_BACKUP = 'delete_backup';
 const SERVICE_CANCEL_ADD_WORK_AREA = 'cancel_add_work_area';
+const SERVICE_REFRESH_MAP = 'refresh_map';
 
 // Phases reported by the backend BLE session while it records a new work zone.
 const BLE_PHASES = [
@@ -332,7 +333,9 @@ class SunseekerMapEditCard extends HTMLElement {
 
     const error = /error|fail|abort|not received|did not arrive/i.test(text);
     const cancelled = /cancelled/i.test(text);
-    const done = /disconnect/i.test(text) || cancelled;
+    // Any error/cancellation means the session has ended just as surely as a
+    // clean disconnect, so treat both as terminal states in the UI.
+    const done = /disconnect/i.test(text) || cancelled || error;
     const percent = done
       ? 100
       : Math.round(((Math.max(phase, 1) - 1 + fraction) / BLE_PHASES.length) * 100);
@@ -794,6 +797,11 @@ canvas { display: block; width: 100%; height: 100%; }
   gap: 10px;
   margin-bottom: 8px;
 }
+.backup-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
 .backup-title {
   font-size: 12px;
   font-weight: 700;
@@ -1090,6 +1098,9 @@ input[type=file] { display: none; }
     </div>
 
     <div class="backup-wrap">
+      <div class="backup-toolbar">
+        <button class="btn" id="refresh-map-btn" title="Force-refetch map and backup data from the server">🔄 Refresh</button>
+      </div>
       <div class="backup-hd">
         <div>
           <div class="backup-title">Map Backups</div>
@@ -1126,6 +1137,7 @@ input[type=file] { display: none; }
     this._backupSub = this.shadowRoot.getElementById('backup-sub');
     this._backupGrid = this.shadowRoot.getElementById('backup-grid');
     this._backupBtn = this.shadowRoot.getElementById('backup-btn');
+    this._refreshMapBtn = this.shadowRoot.getElementById('refresh-map-btn');
     this._confirmDlg = this.shadowRoot.getElementById('confirm-dlg');
     this._confirmTitle = this.shadowRoot.getElementById('confirm-title');
     this._confirmMsg = this.shadowRoot.getElementById('confirm-msg');
@@ -1172,6 +1184,7 @@ input[type=file] { display: none; }
     this.shadowRoot.getElementById('save-btn').onclick    = () => this._save();
     this.shadowRoot.getElementById('reload-btn').onclick  = () => this._resetAndReload();
     this.shadowRoot.getElementById('backup-btn').onclick  = () => this._backupCurrentMap();
+    this.shadowRoot.getElementById('refresh-map-btn').onclick = () => this._refreshMapFromServer();
     this.shadowRoot.getElementById('draw-type').onchange  = e => {
       const nextType = e.target.value;
       if (nextType === 'region_work' && this._hasLocalEdits && this._editScope !== 'work') {
@@ -3166,6 +3179,28 @@ input[type=file] { display: none; }
     this._backupGrid.querySelectorAll('[data-delete-mapid]').forEach(btn => {
       btn.addEventListener('click', () => this._deleteBackup(btn.dataset.deleteMapid));
     });
+  }
+
+  async _refreshMapFromServer() {
+    if (!this._hass || !this._config?.entity) {
+      this._status('⚠️ No entity configured');
+      return;
+    }
+    this._refreshMapBtn.disabled = true;
+    this._status('🔄 Refreshing map and backups from the server…');
+    try {
+      await this._hass.callService(SERVICE_DOMAIN, SERVICE_REFRESH_MAP, {
+        entity_id: this._config.entity,
+      });
+      this._lastEntityKey = null;
+      this._backupSig = '';
+      this._tryLoadFromEntity();
+      this._status('✅ Map and backups refreshed from the server');
+    } catch (err) {
+      this._status(`❌ Refresh failed: ${err?.message || err}`);
+    } finally {
+      this._refreshMapBtn.disabled = false;
+    }
   }
 
   async _backupCurrentMap() {
