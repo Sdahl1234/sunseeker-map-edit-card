@@ -189,6 +189,16 @@ spare phone and tape the phone on top of the mower — the proxy then stays with
 centimetres of the mower for the whole session, and Home Assistant talks to the
 mower over Wi-Fi through the phone.
 
+### Example flow
+Added the new area and route points
+<img width="1587" height="586" alt="new work area 1" src="https://github.com/user-attachments/assets/ff72e590-7865-4b68-96d5-7a7f5b805a40" />
+Mower moving to new area
+<img width="1590" height="675" alt="new work area 2" src="https://github.com/user-attachments/assets/0de9c19f-a689-4e6c-b093-ceae8b5a51dd" />
+New area added
+<img width="1591" height="647" alt="new work area 3" src="https://github.com/user-attachments/assets/865bcf6d-86c3-4d30-be9a-0d3f8f02839b" />
+
+
+
 ## Backup Panel
 
 The backup panel displays up to 5 backups from `map_backup.data`.
